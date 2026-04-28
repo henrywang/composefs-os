@@ -1,0 +1,37 @@
+# Minimal bootable Arch image for composefs-rs deployment. STUB.
+#
+# Not yet validated. Same contract as the Fedora image. Arch normally uses
+# mkinitcpio, but for cbootc we standardize on dracut everywhere.
+
+FROM archlinux:latest
+
+RUN pacman -Syu --noconfirm \
+        linux linux-firmware \
+        systemd udev dbus-broker \
+        util-linux coreutils bash \
+        networkmanager iproute2 iputils \
+        e2fsprogs dosfstools btrfs-progs \
+        grub efibootmgr \
+        dracut \
+        vim less \
+    && pacman -Rns --noconfirm mkinitcpio || true \
+    && pacman -Scc --noconfirm
+
+# Layout adjustments — same as Fedora
+RUN if [ -d /etc ] && [ ! -L /etc ]; then mv /etc /usr/etc && mkdir /etc; fi
+RUN if [ -d /var ] && [ ! -L /var ]; then \
+        mkdir -p /usr/share/factory && \
+        mv /var /usr/share/factory/var && \
+        mkdir /var; \
+    fi
+RUN mkdir -p /usr/lib/tmpfiles.d && \
+    printf 'q /var 0755 - - -\nC /var - - - - -\n' \
+        > /usr/lib/tmpfiles.d/00-var-factory.conf
+
+# TODO: composefs dracut module + dracut invocation
+
+LABEL containers.bootc=1
+LABEL composefs.backend=cfs-rs
+LABEL org.opencontainers.image.title="Arch Minimal (composefs-rs)"
+
+CMD ["/sbin/init"]

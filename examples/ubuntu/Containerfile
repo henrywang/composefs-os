@@ -1,0 +1,40 @@
+# Minimal bootable Ubuntu image for composefs-rs deployment. STUB.
+#
+# Not yet validated. Same contract as the Fedora image — see DESIGN.md
+# "Multi-Distro Strategy". Use dracut, not initramfs-tools.
+
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        linux-image-generic linux-firmware \
+        systemd systemd-sysv udev dbus-broker \
+        util-linux coreutils bash \
+        network-manager iproute2 iputils-ping \
+        e2fsprogs dosfstools btrfs-progs \
+        grub-efi-amd64 grub-efi-amd64-bin shim-signed efibootmgr \
+        dracut dracut-network \
+        vim-tiny less \
+    && apt-get purge -y initramfs-tools initramfs-tools-core \
+    && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
+
+# Layout adjustments — same as Fedora
+RUN if [ -d /etc ] && [ ! -L /etc ]; then mv /etc /usr/etc && mkdir /etc; fi
+RUN if [ -d /var ] && [ ! -L /var ]; then \
+        mkdir -p /usr/share/factory && \
+        mv /var /usr/share/factory/var && \
+        mkdir /var; \
+    fi
+RUN mkdir -p /usr/lib/tmpfiles.d && \
+    printf 'q /var 0755 - - -\nC /var - - - - -\n' \
+        > /usr/lib/tmpfiles.d/00-var-factory.conf
+
+# TODO: composefs dracut module + dracut invocation, same as Fedora
+
+LABEL containers.bootc=1
+LABEL composefs.backend=cfs-rs
+LABEL org.opencontainers.image.title="Ubuntu Minimal (composefs-rs)"
+
+CMD ["/sbin/init"]

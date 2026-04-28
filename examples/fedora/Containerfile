@@ -1,0 +1,101 @@
+# Minimal bootable Fedora image for composefs-rs deployment.
+#
+# Build:  podman build -t fedora-cfs-minimal:latest -f Containerfile .
+# Deploy: cfsctl --repo /sysroot/composefs oci pull \
+#             containers-storage:fedora-cfs-minimal:latest
+#
+# See DESIGN.md "Multi-Distro Strategy" for the contract this image meets.
+
+FROM quay.io/fedora/fedora:41
+
+# ---------------------------------------------------------------------------
+# 1. Install the bootable system
+# ---------------------------------------------------------------------------
+RUN dnf install -y --setopt=install_weak_deps=False \
+        kernel kernel-modules kernel-modules-core linux-firmware \
+        systemd systemd-udev systemd-resolved dbus-broker \
+        util-linux util-linux-core coreutils bash \
+        NetworkManager iproute iputils \
+        dnf5 rpm \
+        e2fsprogs dosfstools btrfs-progs \
+        grub2-efi-x64 grub2-efi-x64-modules grub2-tools grub2-tools-minimal \
+        shim-x64 efibootmgr \
+        dracut dracut-network \
+        vim-minimal less \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf /var/log/dnf*
+
+# ---------------------------------------------------------------------------
+# 2. Filesystem layout adjustments for composefs-rs
+# ---------------------------------------------------------------------------
+# /etc -> /usr/etc (factory), /etc becomes runtime overlay mountpoint
+RUN if [ -d /etc ] && [ ! -L /etc ]; then \
+        mv /etc /usr/etc && mkdir /etc; \
+    fi
+
+# /var content -> /usr/share/factory/var, /var becomes runtime mountpoint
+RUN if [ -d /var ] && [ ! -L /var ]; then \
+        mkdir -p /usr/share/factory && \
+        mv /var /usr/share/factory/var && \
+        mkdir /var; \
+    fi
+
+# tmpfiles snippet recreates /var on first boot
+RUN mkdir -p /usr/lib/tmpfiles.d && \
+    printf 'q /var 0755 - - -\nC /var - - - - -\n' \
+        > /usr/lib/tmpfiles.d/00-var-factory.conf
+
+# Conventional symlinks /home, /opt, /srv -> under /var
+RUN mkdir -p /usr/share/factory/var/home \
+              /usr/share/factory/var/opt \
+              /usr/share/factory/var/srv && \
+    rm -rf /home /opt /srv && \
+    ln -sf var/home /home && \
+    ln -sf var/opt  /opt && \
+    ln -sf var/srv  /srv
+
+# ---------------------------------------------------------------------------
+# 3. Composefs dracut module
+# ---------------------------------------------------------------------------
+# TODO: drop in the dracut module from composefs-rs/dracut/ here, e.g.:
+#   COPY composefs-dracut/ /usr/lib/dracut/modules.d/90composefs/
+# Without this the initramfs cannot mount the composefs root.
+
+# ---------------------------------------------------------------------------
+# 4. Generate initramfs (assumes composefs dracut module is present)
+# ---------------------------------------------------------------------------
+RUN KVER=$(ls /usr/lib/modules | head -1) && \
+    dracut --force --no-hostonly --kver "$KVER" \
+        --add "systemd systemd-initrd dbus base bash" \
+        --add-drivers "overlay erofs loop" \
+        --reproducible \
+        "/usr/lib/modules/$KVER/initramfs.img" && \
+    if [ -f "/boot/vmlinuz-$KVER" ] && [ ! -f "/usr/lib/modules/$KVER/vmlinuz" ]; then \
+        cp "/boot/vmlinuz-$KVER" "/usr/lib/modules/$KVER/vmlinuz"; \
+    fi && \
+    rm -rf /boot/*
+
+# ---------------------------------------------------------------------------
+# 5. systemd configuration
+# ---------------------------------------------------------------------------
+RUN systemctl enable NetworkManager.service systemd-resolved.service && \
+    systemctl set-default multi-user.target
+
+# Console autologin for first-boot debugging — REMOVE FOR PRODUCTION
+RUN echo 'root:fedora' | chpasswd && \
+    mkdir -p /usr/etc/systemd/system/serial-getty@ttyS0.service.d && \
+    printf '[Service]\nExecStart=\nExecStart=-/sbin/agetty --autologin root --noclear %%I 115200,38400,9600 vt220\n' \
+        > /usr/etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf
+
+RUN echo 'fedora-cfs' > /usr/etc/hostname
+
+# ---------------------------------------------------------------------------
+# 6. Labels
+# ---------------------------------------------------------------------------
+LABEL containers.bootc=1
+LABEL composefs.backend=cfs-rs
+LABEL org.opencontainers.image.title="Fedora Minimal (composefs-rs)"
+LABEL org.opencontainers.image.description="Minimal bootable Fedora using composefs-rs"
+LABEL org.opencontainers.image.version="41"
+
+CMD ["/sbin/init"]
