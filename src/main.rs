@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 
 mod cfsctl;
 mod config;
+mod install;
 mod rollback;
 mod signing;
 mod status;
@@ -35,6 +36,11 @@ enum Command {
     },
     /// Verify current image's signature against configured key
     Verify,
+    /// Install the current container image onto a disk
+    Install {
+        #[command(subcommand)]
+        command: install::InstallCommand,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -45,5 +51,6 @@ fn main() -> anyhow::Result<()> {
         Command::Rollback => rollback::run(),
         Command::Switch { image_ref } => switch::run(image_ref),
         Command::Verify => verify::run(),
+        Command::Install { command } => install::run(command),
     }
 }

@@ -10,9 +10,12 @@
 #   podman build -t fedora-cfs-base:43 -f examples/fedora/Containerfile.base .
 #   podman build -t my-fedora-cfs:latest -f examples/fedora/Containerfile .
 # Deploy:
-#   sudo ./tools/build-disk.sh containers-storage:my-fedora-cfs:latest out.qcow2 10
+#   podman run --rm --privileged -v /dev:/dev my-fedora-cfs:latest \
+#       cbootc install to-disk /dev/vda --wipe
 
-FROM fedora-cfs-base:43 AS build
+# BASE_IMAGE can be overridden in CI to reference ghcr.io/…/fedora-cfs-base:43
+ARG BASE_IMAGE=fedora-cfs-base:43
+FROM ${BASE_IMAGE} AS build
 
 # --- Customise below this line -------------------------------------------
 
