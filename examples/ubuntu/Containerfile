@@ -2,7 +2,21 @@
 #
 # Not yet validated. Same contract as the Fedora image — see DESIGN.md
 # "Multi-Distro Strategy". Use dracut, not initramfs-tools.
+#
+# Build:  podman build -t ubuntu-cfs-minimal:latest -f examples/ubuntu/Containerfile .
 
+# ---------------------------------------------------------------------------
+# Stage 0: Build cbootc from source
+# ---------------------------------------------------------------------------
+FROM rust:1-slim AS builder
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY src/ src/
+RUN cargo build --release
+
+# ---------------------------------------------------------------------------
+# Stage 1: OS image
+# ---------------------------------------------------------------------------
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -20,8 +34,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
-# Layout adjustments — same as Fedora
-RUN if [ -d /etc ] && [ ! -L /etc ]; then mv /etc /usr/etc && mkdir /etc; fi
+# Layout adjustments — same as Fedora.
+# Use cp+find instead of mv: container runtime bind-mounts hosts/hostname/resolv.conf.
+RUN if [ -d /etc ] && [ ! -L /etc ]; then \
+        mkdir /usr/etc && \
+        cp -a /etc/. /usr/etc/ && \
+        find /etc -mindepth 1 -maxdepth 1 \
+            ! -name hosts ! -name hostname ! -name resolv.conf \
+            -exec rm -rf {} +; \
+    fi
 RUN if [ -d /var ] && [ ! -L /var ]; then \
         mkdir -p /usr/share/factory && \
         mv /var /usr/share/factory/var && \
@@ -32,6 +53,13 @@ RUN mkdir -p /usr/lib/tmpfiles.d && \
         > /usr/lib/tmpfiles.d/00-var-factory.conf
 
 # TODO: composefs dracut module + dracut invocation, same as Fedora
+
+# ---------------------------------------------------------------------------
+# Install cbootc
+# ---------------------------------------------------------------------------
+COPY --from=builder /build/target/release/cbootc /usr/bin/cbootc
+COPY units/cbootc-update.service units/cbootc-update.timer /usr/lib/systemd/system/
+RUN systemctl enable cbootc-update.timer
 
 LABEL containers.bootc=1
 LABEL composefs.backend=cfs-rs

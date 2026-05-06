@@ -1,0 +1,10 @@
+[Unit]
+Description=cbootc automatic image upgrade
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/cbootc/config.toml
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/cbootc upgrade
+SyslogIdentifier=cbootc

@@ -21,8 +21,8 @@ deliberately out of scope.
 
 ## Status
 
-Greenfield. Design done, no implementation yet. See DESIGN.md section
-"Implementation Plan" for the order of work.
+Steps 1–7 of the implementation plan are complete. The binary compiles and all
+five commands are wired up. Step 8 (integration tests in QEMU) is next.
 
 ## Repository Layout
 
@@ -30,7 +30,10 @@ Greenfield. Design done, no implementation yet. See DESIGN.md section
 cbootc/
   DESIGN.md                  Design notes — start here
   README.md                  This file
-  src/                       Rust source for the cbootc binary (not yet)
+  src/                       Rust source for the cbootc binary
+  units/
+    cbootc-update.service    Systemd service for automatic upgrades
+    cbootc-update.timer      Systemd timer (daily, with randomized delay)
   tools/
     build-disk.sh            Build a qcow2/raw image from a container image
   examples/
@@ -39,10 +42,10 @@ cbootc/
     arch/Containerfile       Minimal bootable Arch image (TODO)
 ```
 
-## Quick Start (Once Implemented)
+## Quick Start
 
 ```sh
-# Build a bootable image
+# Build a bootable image (also compiles cbootc inside the build)
 podman build -t my-cfs-image:latest -f examples/fedora/Containerfile .
 
 # Build a qcow2 disk image from it
@@ -54,17 +57,33 @@ sudo ./tools/build-disk.sh \
 # Boot it
 qemu-system-x86_64 -enable-kvm -m 4096 \
     -drive file=out.qcow2,if=virtio \
-    -bios /usr/share/edk2/ovmf/OVMF_CODE.fd \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/ovmf/OVMF_CODE.fd \
     -nographic
 
 # Once running, upgrade in place:
 sudo cbootc upgrade --reboot
 ```
 
+## Automatic Updates
+
+The example Containerfiles install and enable the update timer automatically.
+On a running system, or if you built a custom image, install manually:
+
+```sh
+sudo cp units/cbootc-update.{service,timer} /etc/systemd/system/
+sudo systemctl enable --now cbootc-update.timer
+```
+
+The timer runs `cbootc upgrade` once a day with a randomised one-hour delay.
+It stages the new image but does not reboot — reboot on your own schedule.
+The service is a no-op when `/etc/cbootc/config.toml` does not exist.
+
 ## Building cbootc Itself
 
-Not yet. First step: `cargo init` and the CLI skeleton from DESIGN.md
-section "Implementation Plan" step 1.
+```sh
+cargo build --release
+# binary at target/release/cbootc
+```
 
 ## License
 

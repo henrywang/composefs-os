@@ -1,0 +1,238 @@
+# fedora-cfs-base:43 — Base image for composefs-rs bootable Fedora 43 systems.
+#
+# This image contains the kernel, systemd, grub2, composefs toolchain (cfsctl,
+# composefs-setup-root, dracut module), and cbootc. /etc and /var are left
+# intact so derived images can use dnf normally.
+#
+# Derived images must call 'RUN cfs-layout-apply' as their final step, then
+# copy the result into a FROM scratch stage. See examples/fedora/Containerfile.
+#
+# Build: podman build -t fedora-cfs-base:43 -f examples/fedora/Containerfile.base .
+
+# ---------------------------------------------------------------------------
+# Stage 0a: Build cbootc
+# ---------------------------------------------------------------------------
+FROM rust:1-slim AS cbootc-builder
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY src/ src/
+RUN cargo build --release
+
+# ---------------------------------------------------------------------------
+# Stage 0b: Build composefs-rs tools (cfsctl + composefs-setup-root)
+# ---------------------------------------------------------------------------
+FROM rust:1-slim AS composefs-builder
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+RUN git clone --depth=1 https://github.com/containers/composefs-rs .
+RUN cargo build --release -p cfsctl && \
+    cargo build --release -p composefs-setup-root --no-default-features
+
+# ---------------------------------------------------------------------------
+# Stage 1: Bootstrap Fedora 43 rootfs via dnf --installroot
+# ---------------------------------------------------------------------------
+FROM quay.io/fedora/fedora:43 AS rootfs-builder
+
+# Install dracut on the builder for 'dracut --sysroot /rootfs'
+RUN dnf install -y dracut && dnf clean all
+
+RUN dnf install -y \
+        --installroot /rootfs \
+        --use-host-config \
+        --releasever 43 \
+        --setopt=install_weak_deps=False \
+        fedora-repos \
+        kernel kernel-modules kernel-modules-core linux-firmware \
+        systemd systemd-udev systemd-resolved dbus-broker \
+        util-linux util-linux-core coreutils bash rootfiles shadow-utils \
+        NetworkManager iproute iputils hostname \
+        dnf5 rpm \
+        e2fsprogs dosfstools btrfs-progs \
+        grub2-efi-x64 grub2-efi-x64-modules grub2-tools grub2-tools-minimal \
+        shim-x64 efibootmgr \
+        dracut \
+        vim-minimal less \
+    && dnf clean all --installroot /rootfs --use-host-config \
+    && rm -rf /rootfs/var/cache/dnf /rootfs/var/log/dnf*
+
+# ---------------------------------------------------------------------------
+# PAM configuration
+# pam installs /etc/pam.d/system-auth and password-auth as symlinks into
+# /etc/authselect/ which only exists after 'authselect select' runs.
+# authselect cannot run in a --installroot container build, so replace the
+# broken symlinks with real pam_unix configs for local password auth.
+# ---------------------------------------------------------------------------
+RUN mkdir -p /rootfs/etc/authselect && \
+    cat > /rootfs/etc/authselect/system-auth <<'EOF'
+#%PAM-1.0
+auth        required    pam_env.so
+auth        sufficient  pam_unix.so nullok
+auth        required    pam_deny.so
+
+account     required    pam_unix.so
+
+password    sufficient  pam_unix.so sha512 shadow nullok
+password    required    pam_deny.so
+
+session     required    pam_limits.so
+-session    optional    pam_systemd.so
+session     required    pam_unix.so
+EOF
+RUN cp /rootfs/etc/authselect/system-auth /rootfs/etc/authselect/password-auth
+RUN cat > /rootfs/etc/authselect/postlogin <<'EOF'
+#%PAM-1.0
+session  optional   pam_keyinit.so revoke
+session  include    system-auth
+EOF
+RUN printf '#%%PAM-1.0\nauth required pam_deny.so\n' \
+        > /rootfs/etc/authselect/fingerprint-auth && \
+    cp /rootfs/etc/authselect/fingerprint-auth \
+       /rootfs/etc/authselect/smartcard-auth
+
+# Allow root login on serial console (Fedora 43 securetty omits ttyS*)
+RUN echo 'ttyS0' >> /rootfs/etc/securetty
+
+# Disable SELinux — no policy installed in this minimal image
+RUN mkdir -p /rootfs/etc/selinux && \
+    printf 'SELINUX=disabled\nSELINUXTYPE=targeted\n' \
+        > /rootfs/etc/selinux/config
+
+# ---------------------------------------------------------------------------
+# composefs dracut module (37composefs → module name 'composefs')
+# ---------------------------------------------------------------------------
+RUN mkdir -p /rootfs/usr/lib/dracut/modules.d/37composefs
+COPY --from=composefs-builder \
+    /build/target/release/composefs-setup-root \
+    /rootfs/usr/lib/dracut/modules.d/37composefs/composefs-setup-root
+RUN cat > /rootfs/usr/lib/dracut/modules.d/37composefs/module-setup.sh <<'EOF'
+#!/usr/bin/bash
+check() { return 0; }
+depends() { return 0; }
+install() {
+    inst "${moddir}/composefs-setup-root" /bin/composefs-setup-root
+    inst "${moddir}/composefs-setup-root.service" \
+        "${systemdsystemunitdir}/composefs-setup-root.service"
+    $SYSTEMCTL -q --root "${initdir}" add-wants \
+        initrd-root-fs.target composefs-setup-root.service
+}
+EOF
+RUN chmod +x /rootfs/usr/lib/dracut/modules.d/37composefs/module-setup.sh
+RUN cat > /rootfs/usr/lib/dracut/modules.d/37composefs/composefs-setup-root.service <<'EOF'
+[Unit]
+DefaultDependencies=no
+ConditionKernelCommandLine=composefs
+ConditionPathExists=/etc/initrd-release
+After=sysroot.mount
+Requires=sysroot.mount
+Before=initrd-root-fs.target
+Before=initrd-switch-root.target
+OnFailure=emergency.target
+OnFailureJobMode=isolate
+
+[Service]
+Type=oneshot
+ExecStart=/bin/composefs-setup-root
+StandardInput=null
+StandardOutput=journal
+StandardError=journal+console
+RemainAfterExit=yes
+EOF
+
+# Build initramfs using dracut --sysroot (no chroot or bind-mounts needed)
+RUN KVER=$(ls /rootfs/usr/lib/modules | head -1) && \
+    dracut --sysroot /rootfs \
+        --force --no-hostonly --kver "$KVER" \
+        --tmpdir /tmp \
+        --add "systemd systemd-initrd dbus base bash composefs" \
+        --add-drivers "overlay erofs loop virtio_blk virtio_pci vfat" \
+        --reproducible \
+        "/rootfs/usr/lib/modules/$KVER/initramfs.img" && \
+    if [ -f "/rootfs/boot/vmlinuz-$KVER" ] && \
+       [ ! -f "/rootfs/usr/lib/modules/$KVER/vmlinuz" ]; then \
+        cp "/rootfs/boot/vmlinuz-$KVER" \
+           "/rootfs/usr/lib/modules/$KVER/vmlinuz"; \
+    fi && \
+    rm -rf /rootfs/boot/*
+
+# ---------------------------------------------------------------------------
+# Install cfsctl, cbootc, and update units
+# Enable services — symlinks land in /rootfs/etc/systemd (preserved in image)
+# ---------------------------------------------------------------------------
+COPY --from=composefs-builder /build/target/release/cfsctl /rootfs/usr/bin/cfsctl
+COPY --from=cbootc-builder /build/target/release/cbootc /rootfs/usr/bin/cbootc
+COPY units/cbootc-update.service units/cbootc-update.timer \
+    /rootfs/usr/lib/systemd/system/
+
+RUN systemctl --root /rootfs enable \
+        NetworkManager.service systemd-resolved.service cbootc-update.timer && \
+    systemctl --root /rootfs set-default multi-user.target && \
+    systemctl --root /rootfs mask systemd-firstboot.service \
+        authselect-apply-changes.service authselect-apply-changes.path && \
+    rm -f /rootfs/usr/lib/systemd/system/authselect-apply-changes.service \
+          /rootfs/usr/lib/systemd/system/authselect-apply-changes.path \
+          /rootfs/usr/lib/systemd/system/systemd-firstboot.service
+
+# ---------------------------------------------------------------------------
+# cfs-layout-apply — run this as the last step in derived images
+# ---------------------------------------------------------------------------
+RUN cat > /rootfs/usr/bin/cfs-layout-apply <<'SCRIPT'
+#!/bin/bash
+# Apply composefs-rs filesystem layout adjustments.
+# Must be the last RUN in derived Containerfiles before FROM scratch.
+set -euo pipefail
+
+# Rebuild initramfs while /etc (and /etc/pki) are still intact,
+# picking up any kernel modules installed in the derived image.
+KVER=$(ls /usr/lib/modules | head -1)
+dracut --force --no-hostonly --kver "$KVER" \
+    --tmpdir /tmp \
+    --add "systemd systemd-initrd dbus base bash composefs" \
+    --add-drivers "overlay erofs loop virtio_blk virtio_pci vfat" \
+    --reproducible \
+    "/usr/lib/modules/$KVER/initramfs.img"
+
+# /etc → /usr/etc (factory). Can't mv: container runtime bind-mounts
+# /etc/hosts, /etc/hostname, /etc/resolv.conf into every build container.
+mkdir -p /usr/etc
+cp -a /etc/. /usr/etc/
+find /etc -mindepth 1 -maxdepth 1 \
+    ! -name hosts ! -name hostname ! -name resolv.conf \
+    -exec rm -rf {} +
+
+# /var → /usr/share/factory/var; /var becomes a runtime mount point
+mkdir -p /usr/share/factory
+mv /var /usr/share/factory/var
+mkdir /var
+
+# Recreate /var on first boot from the factory tree
+mkdir -p /usr/lib/tmpfiles.d
+printf 'q /var 0755 - - -\nC /var - - - - -\n' \
+    > /usr/lib/tmpfiles.d/00-var-factory.conf
+
+# Empty mount point required by composefs-rs
+mkdir -p /sysroot
+
+# Conventional top-level symlinks into /var
+mkdir -p /usr/share/factory/var/home \
+         /usr/share/factory/var/opt \
+         /usr/share/factory/var/srv
+rm -rf /home /opt /srv
+ln -sf var/home /home
+ln -sf var/opt  /opt
+ln -sf var/srv  /srv
+SCRIPT
+RUN chmod +x /rootfs/usr/bin/cfs-layout-apply
+
+# ---------------------------------------------------------------------------
+# Final stage — /etc and /var intact so derived images can use dnf
+# ---------------------------------------------------------------------------
+FROM scratch
+COPY --from=rootfs-builder /rootfs /
+
+LABEL containers.bootc=1
+LABEL composefs.backend=cfs-rs
+LABEL org.opencontainers.image.title="Fedora CFS Base"
+LABEL org.opencontainers.image.description="Base image for composefs-rs bootable Fedora 43 systems"
+LABEL org.opencontainers.image.version="43"
+
+CMD ["/sbin/init"]

@@ -2,7 +2,21 @@
 #
 # Not yet validated. Same contract as the Fedora image. Arch normally uses
 # mkinitcpio, but for cbootc we standardize on dracut everywhere.
+#
+# Build:  podman build -t arch-cfs-minimal:latest -f examples/arch/Containerfile .
 
+# ---------------------------------------------------------------------------
+# Stage 0: Build cbootc from source
+# ---------------------------------------------------------------------------
+FROM rust:1-slim AS builder
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY src/ src/
+RUN cargo build --release
+
+# ---------------------------------------------------------------------------
+# Stage 1: OS image
+# ---------------------------------------------------------------------------
 FROM archlinux:latest
 
 RUN pacman -Syu --noconfirm \
@@ -17,8 +31,15 @@ RUN pacman -Syu --noconfirm \
     && pacman -Rns --noconfirm mkinitcpio || true \
     && pacman -Scc --noconfirm
 
-# Layout adjustments — same as Fedora
-RUN if [ -d /etc ] && [ ! -L /etc ]; then mv /etc /usr/etc && mkdir /etc; fi
+# Layout adjustments — same as Fedora.
+# Use cp+find instead of mv: container runtime bind-mounts hosts/hostname/resolv.conf.
+RUN if [ -d /etc ] && [ ! -L /etc ]; then \
+        mkdir /usr/etc && \
+        cp -a /etc/. /usr/etc/ && \
+        find /etc -mindepth 1 -maxdepth 1 \
+            ! -name hosts ! -name hostname ! -name resolv.conf \
+            -exec rm -rf {} +; \
+    fi
 RUN if [ -d /var ] && [ ! -L /var ]; then \
         mkdir -p /usr/share/factory && \
         mv /var /usr/share/factory/var && \
@@ -29,6 +50,13 @@ RUN mkdir -p /usr/lib/tmpfiles.d && \
         > /usr/lib/tmpfiles.d/00-var-factory.conf
 
 # TODO: composefs dracut module + dracut invocation
+
+# ---------------------------------------------------------------------------
+# Install cbootc
+# ---------------------------------------------------------------------------
+COPY --from=builder /build/target/release/cbootc /usr/bin/cbootc
+COPY units/cbootc-update.service units/cbootc-update.timer /usr/lib/systemd/system/
+RUN systemctl enable cbootc-update.timer
 
 LABEL containers.bootc=1
 LABEL composefs.backend=cfs-rs

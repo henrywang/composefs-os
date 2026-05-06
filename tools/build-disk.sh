@@ -68,6 +68,7 @@ echo "==> Formatting filesystems"
 mkfs.fat -F32 -n EFI    "$EFI_PART"  >/dev/null
 mkfs.ext4 -F -L boot    "$BOOT_PART" >/dev/null
 mkfs.ext4 -F -L root -O verity "$ROOT_PART" >/dev/null
+ROOT_UUID=$(blkid -s UUID -o value "$ROOT_PART")
 
 echo "==> Mounting"
 mount "$ROOT_PART" "$MOUNT_ROOT"
@@ -78,7 +79,7 @@ mount "$EFI_PART" "$MOUNT_ROOT/boot/efi"
 
 echo "==> Initializing composefs repo"
 mkdir -p "$MOUNT_ROOT/composefs"
-cfsctl --repo "$MOUNT_ROOT/composefs" oci init || true
+cfsctl --repo "$MOUNT_ROOT/composefs" init
 
 echo "==> Pulling image: $IMAGE_REF"
 cfsctl --repo "$MOUNT_ROOT/composefs" oci pull "$IMAGE_REF"
@@ -89,14 +90,14 @@ echo "    digest = $DIGEST"
 
 echo "==> Preparing boot entries"
 cfsctl --repo "$MOUNT_ROOT/composefs" oci prepare-boot \
-    --boot-dir "$MOUNT_ROOT/boot" \
-    "$DIGEST"
+    --bootdir "$MOUNT_ROOT/boot" \
+    --cmdline "root=UUID=$ROOT_UUID rootfstype=ext4 rw console=ttyS0,115200" \
+    "$IMAGE_REF"
 
 echo "==> Setting up /var and /etc mountpoints"
 mkdir -p "$MOUNT_ROOT/var" "$MOUNT_ROOT/etc"
 
 echo "==> Writing fstab"
-ROOT_UUID=$(blkid -s UUID -o value "$ROOT_PART")
 BOOT_UUID=$(blkid -s UUID -o value "$BOOT_PART")
 EFI_UUID=$(blkid -s UUID -o value "$EFI_PART")
 cat > "$MOUNT_ROOT/etc/fstab" <<EOF
@@ -113,14 +114,20 @@ GRUB_INSTALL=$(command -v grub2-install || command -v grub-install)
     --boot-directory="$MOUNT_ROOT/boot" \
     --bootloader-id=cbootc \
     --removable \
-    --no-nvram
+    --no-nvram \
+    --force
 
 # Minimal grub.cfg that just scans BLS entries cfsctl wrote
 mkdir -p "$MOUNT_ROOT/boot/grub2"
 cat > "$MOUNT_ROOT/boot/grub2/grub.cfg" <<'EOF'
 set timeout=3
+serial --unit=0 --speed=115200
+terminal_input serial console
+terminal_output serial console
+insmod ext2
+insmod all_video
+function load_video { true; }
 insmod blscfg
-insmod bli
 blscfg
 EOF
 
@@ -151,5 +158,5 @@ echo
 echo "Boot it with:"
 echo "  qemu-system-x86_64 -enable-kvm -m 4096 \\"
 echo "      -drive file=$OUTPUT,if=virtio \\"
-echo "      -bios /usr/share/edk2/ovmf/OVMF_CODE.fd \\"
+echo "      -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/ovmf/OVMF_CODE.fd \\"
 echo "      -nographic"
