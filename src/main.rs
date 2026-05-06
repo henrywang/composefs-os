@@ -11,7 +11,11 @@ mod upgrade;
 mod verify;
 
 #[derive(Parser)]
-#[command(name = "cbootc", about = "Minimal bootc-like tool for composefs-rs systems", version)]
+#[command(
+    name = "cbootc",
+    about = "Minimal bootc-like tool for composefs-rs systems",
+    version
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,

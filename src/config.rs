@@ -38,7 +38,9 @@ pub fn require_image_ref() -> Result<String> {
 // v1 rewrites the whole file; revisit when more fields land.
 pub fn write_image_ref(new_ref: &str) -> Result<()> {
     let config = Config {
-        image: Some(ImageConfig { image_ref: new_ref.to_owned() }),
+        image: Some(ImageConfig {
+            image_ref: new_ref.to_owned(),
+        }),
     };
     let toml = toml::to_string_pretty(&config).context("serializing config")?;
     let dir = Path::new(CONFIG_PATH).parent().unwrap();

@@ -11,10 +11,7 @@ fn base() -> Command {
 
 /// Run a cfsctl subcommand, inheriting stdio so progress reaches the terminal.
 pub fn run(args: &[&str]) -> Result<()> {
-    let status = base()
-        .args(args)
-        .status()
-        .context("spawning cfsctl")?;
+    let status = base().args(args).status().context("spawning cfsctl")?;
     if !status.success() {
         anyhow::bail!("cfsctl {} exited {}", args.join(" "), status);
     }
@@ -23,10 +20,7 @@ pub fn run(args: &[&str]) -> Result<()> {
 
 /// Run a cfsctl subcommand and return its stdout as a string.
 pub fn output(args: &[&str]) -> Result<String> {
-    let out = base()
-        .args(args)
-        .output()
-        .context("spawning cfsctl")?;
+    let out = base().args(args).output().context("spawning cfsctl")?;
     if !out.status.success() {
         anyhow::bail!(
             "cfsctl {} exited {}: {}",

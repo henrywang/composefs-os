@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -33,12 +33,18 @@ fn load_entries() -> Result<Vec<BLSEntry>> {
             continue;
         }
         let meta = fs::metadata(&path).with_context(|| format!("stat {}", path.display()))?;
-        let mtime = meta.modified().with_context(|| format!("mtime {}", path.display()))?;
+        let mtime = meta
+            .modified()
+            .with_context(|| format!("mtime {}", path.display()))?;
         let content =
             fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
 
         if let Some(digest) = parse_composefs_digest(&content) {
-            entries.push(BLSEntry { path, composefs_digest: digest, mtime });
+            entries.push(BLSEntry {
+                path,
+                composefs_digest: digest,
+                mtime,
+            });
         }
     }
 

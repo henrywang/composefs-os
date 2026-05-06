@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use std::fs;
 use std::io::Write as _;
@@ -69,7 +69,9 @@ pub fn run_to_disk(opts: ToDiskOpts) -> Result<()> {
         println!("Boot it with:");
         println!("  qemu-system-x86_64 -enable-kvm -m 4096 \\");
         println!("      -drive file={output},if=virtio \\");
-        println!("      -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/ovmf/OVMF_CODE.fd \\");
+        println!(
+            "      -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/ovmf/OVMF_CODE.fd \\"
+        );
         println!("      -nographic");
     }
 
@@ -93,22 +95,20 @@ fn prepare_device(opts: &ToDiskOpts) -> Result<(PathBuf, Option<String>)> {
         .size
         .as_deref()
         .context("--size is required for file-based install (e.g. --size 10G)")?;
-    println!(
-        "==> Creating {} image at {}",
-        size,
-        opts.device.display()
-    );
+    println!("==> Creating {} image at {}", size, opts.device.display());
     run_cmd(
         "truncate",
-        &[
-            &format!("--size={size}"),
-            opts.device.to_str().unwrap(),
-        ],
+        &[&format!("--size={size}"), opts.device.to_str().unwrap()],
     )?;
     println!("==> Attaching loop device");
     let ld = run_cmd_output(
         "losetup",
-        &["--find", "--show", "--partscan", opts.device.to_str().unwrap()],
+        &[
+            "--find",
+            "--show",
+            "--partscan",
+            opts.device.to_str().unwrap(),
+        ],
     )?;
     println!("    {ld}");
     Ok((PathBuf::from(&ld), Some(ld)))
@@ -137,10 +137,7 @@ fn install_inner(
 
     println!("==> Formatting filesystems");
     run_cmd("mkfs.fat", &["-F32", "-n", "EFI", efi_p.to_str().unwrap()])?;
-    run_cmd(
-        "mkfs.ext4",
-        &["-F", "-L", "boot", boot_p.to_str().unwrap()],
-    )?;
+    run_cmd("mkfs.ext4", &["-F", "-L", "boot", boot_p.to_str().unwrap()])?;
     match filesystem {
         "xfs" => run_cmd("mkfs.xfs", &["-f", "-L", "root", root_p.to_str().unwrap()])?,
         _ => run_cmd(
@@ -154,17 +151,26 @@ fn install_inner(
     let efi_uuid = blkid_uuid(efi_p.to_str().unwrap())?;
 
     println!("==> Mounting");
-    run_cmd("mount", &[root_p.to_str().unwrap(), mnt_path.to_str().unwrap()])?;
+    run_cmd(
+        "mount",
+        &[root_p.to_str().unwrap(), mnt_path.to_str().unwrap()],
+    )?;
     mounts.push(mnt_path.to_path_buf());
 
     let boot_mnt = mnt_path.join("boot");
     fs::create_dir_all(&boot_mnt)?;
-    run_cmd("mount", &[boot_p.to_str().unwrap(), boot_mnt.to_str().unwrap()])?;
+    run_cmd(
+        "mount",
+        &[boot_p.to_str().unwrap(), boot_mnt.to_str().unwrap()],
+    )?;
     mounts.push(boot_mnt.clone());
 
     let efi_mnt = mnt_path.join("boot/efi");
     fs::create_dir_all(&efi_mnt)?;
-    run_cmd("mount", &[efi_p.to_str().unwrap(), efi_mnt.to_str().unwrap()])?;
+    run_cmd(
+        "mount",
+        &[efi_p.to_str().unwrap(), efi_mnt.to_str().unwrap()],
+    )?;
     mounts.push(efi_mnt.clone());
 
     println!("==> Initializing composefs repo");
@@ -175,13 +181,17 @@ fn install_inner(
     println!("==> Pulling image: {image_ref}");
     run_cmd(
         "cfsctl",
-        &["--repo", cfs_repo.to_str().unwrap(), "oci", "pull", image_ref],
+        &[
+            "--repo",
+            cfs_repo.to_str().unwrap(),
+            "oci",
+            "pull",
+            image_ref,
+        ],
     )?;
 
     println!("==> Preparing boot entries");
-    let cmdline = format!(
-        "root=UUID={root_uuid} rootfstype={filesystem} rw console=ttyS0,115200"
-    );
+    let cmdline = format!("root=UUID={root_uuid} rootfstype={filesystem} rw console=ttyS0,115200");
     run_cmd(
         "cfsctl",
         &[
@@ -294,7 +304,11 @@ fn check_root() -> Result<()> {
 fn part(dev: &Path, n: u8) -> PathBuf {
     let s = dev.to_str().unwrap();
     // Devices ending in a digit (e.g. nvme0n1, loop0) need a 'p' separator
-    if s.chars().last().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+    if s.chars()
+        .last()
+        .map(|c| c.is_ascii_digit())
+        .unwrap_or(false)
+    {
         PathBuf::from(format!("{s}p{n}"))
     } else {
         PathBuf::from(format!("{s}{n}"))
@@ -355,10 +369,7 @@ fn run_cmd_output(program: &str, args: &[&str]) -> Result<String> {
         .output()
         .with_context(|| format!("failed to run {program}"))?;
     if !out.status.success() {
-        bail!(
-            "{program} failed with {}",
-            out.status
-        );
+        bail!("{program} failed with {}", out.status);
     }
     Ok(String::from_utf8(out.stdout)
         .context("non-UTF-8 output")?

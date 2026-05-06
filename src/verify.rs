@@ -1,17 +1,15 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::fs;
 
 use crate::{config, signing};
 
 pub fn run() -> Result<()> {
     // Confirm we're running from a composefs deployment before trying to verify it.
-    let booted = fs::read_to_string("/proc/cmdline")
-        .ok()
-        .and_then(|c| {
-            c.split_whitespace()
-                .find(|tok| tok.starts_with("composefs="))
-                .map(|tok| tok["composefs=".len()..].to_owned())
-        });
+    let booted = fs::read_to_string("/proc/cmdline").ok().and_then(|c| {
+        c.split_whitespace()
+            .find(|tok| tok.starts_with("composefs="))
+            .map(|tok| tok["composefs=".len()..].to_owned())
+    });
 
     if booted.is_none() {
         bail!("not running from a composefs deployment; nothing to verify");
