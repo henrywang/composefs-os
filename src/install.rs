@@ -2,6 +2,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use std::fs;
 use std::io::Write as _;
+use std::os::unix::fs::symlink;
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -220,7 +221,8 @@ fn install_inner(
     // running system's /etc. The ext4 root's /etc is the lowerdir for the
     // composefs image's /etc, not for the overlay, so writing there has no
     // effect on what the booted system sees.
-    let etc_upper = find_deploy_dir(mnt_path)?.join("etc/upper");
+    let deploy_dir = find_deploy_dir(mnt_path)?;
+    let etc_upper = deploy_dir.join("etc/upper");
 
     println!("==> Writing fstab");
     fs::write(
@@ -232,12 +234,10 @@ fn install_inner(
         ),
     )?;
 
-    println!("==> Writing cbootc config");
-    fs::create_dir_all(etc_upper.join("cbootc"))?;
-    fs::write(
-        etc_upper.join("cbootc/config.toml"),
-        format!("[image]\nref = \"{image_ref}\"\n"),
-    )?;
+    // Replace the per-deployment var with a symlink to a shared state/var so
+    // /var content (databases, logs, cbootc state) survives upgrades.
+    fs::remove_dir(deploy_dir.join("var")).context("removing placeholder var dir")?;
+    symlink("../../var", deploy_dir.join("var")).context("creating shared var symlink")?;
 
     println!("==> Installing GRUB");
     let grub = grub_install_bin();
@@ -273,8 +273,16 @@ fn install_inner(
     )?;
 
     println!("==> Populating /var from image");
-    let state_var = find_deploy_dir(mnt_path)?.join("var");
-    run_cmd("cp", &["-ax", "/var/.", state_var.to_str().unwrap()])?;
+    let shared_var = mnt_path.join("state/var");
+    fs::create_dir_all(&shared_var)?;
+    run_cmd("cp", &["-ax", "/var/.", shared_var.to_str().unwrap()])?;
+
+    println!("==> Writing cbootc config");
+    fs::create_dir_all(shared_var.join("lib/cbootc"))?;
+    fs::write(
+        shared_var.join("lib/cbootc/config.toml"),
+        format!("[image]\nref = \"{image_ref}\"\n"),
+    )?;
 
     println!("==> Syncing");
     Command::new("sync")

@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{fs, io, path::Path};
 
-const CONFIG_PATH: &str = "/etc/cbootc/config.toml";
+const CONFIG_PATH: &str = "/var/lib/cbootc/config.toml";
 
 #[derive(Serialize, Deserialize)]
 struct Config {

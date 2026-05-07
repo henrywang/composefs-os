@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::{fs, path::Path, process::Command};
+use std::{fs, os::unix::fs::symlink, path::Path, path::PathBuf, process::Command};
 
 use crate::{cfsctl, config, signing};
 
@@ -51,6 +51,16 @@ pub fn run(reboot: bool) -> Result<()> {
         &cmdline,
         &image_ref,
     ])?;
+
+    // Wire the new deployment's var to the shared /sysroot/state/var so
+    // /var content survives upgrades.
+    let deploy_var = PathBuf::from("/sysroot/state/deploy")
+        .join(digest.trim())
+        .join("var");
+    if deploy_var.is_dir() {
+        fs::remove_dir(&deploy_var).context("removing new deployment var dir")?;
+        symlink("../../var", &deploy_var).context("creating shared var symlink")?;
+    }
 
     write_state(&digest, manifest_digest.as_deref())?;
     println!("Boot entry written.");
