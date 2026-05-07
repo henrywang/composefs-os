@@ -215,10 +215,16 @@ fn install_inner(
         ],
     )?;
 
+    // cfsctl oci prepare-boot creates state/deploy/<id>/etc/upper/ as the
+    // overlayfs upperdir for /etc. Files placed there are visible in the
+    // running system's /etc. The ext4 root's /etc is the lowerdir for the
+    // composefs image's /etc, not for the overlay, so writing there has no
+    // effect on what the booted system sees.
+    let etc_upper = find_deploy_dir(mnt_path)?.join("etc/upper");
+
     println!("==> Writing fstab");
-    fs::create_dir_all(mnt_path.join("etc"))?;
     fs::write(
-        mnt_path.join("etc/fstab"),
+        etc_upper.join("fstab"),
         format!(
             "UUID={root_uuid}  /          {filesystem}  defaults  0 1\n\
              UUID={boot_uuid}  /boot      ext4          defaults  0 2\n\
@@ -227,9 +233,9 @@ fn install_inner(
     )?;
 
     println!("==> Writing cbootc config");
-    fs::create_dir_all(mnt_path.join("etc/cbootc"))?;
+    fs::create_dir_all(etc_upper.join("cbootc"))?;
     fs::write(
-        mnt_path.join("etc/cbootc/config.toml"),
+        etc_upper.join("cbootc/config.toml"),
         format!("[image]\nref = \"{image_ref}\"\n"),
     )?;
 
@@ -267,7 +273,8 @@ fn install_inner(
     )?;
 
     println!("==> Populating /var from image");
-    populate_state_var(mnt_path)?;
+    let state_var = find_deploy_dir(mnt_path)?.join("var");
+    run_cmd("cp", &["-ax", "/var/.", state_var.to_str().unwrap()])?;
 
     println!("==> Syncing");
     Command::new("sync")
@@ -281,10 +288,7 @@ fn install_inner(
 // Helpers
 // ---------------------------------------------------------------------------
 
-// cfsctl oci prepare-boot creates state/deploy/<digest>/var/ as an empty
-// directory. Populate it from the container's own /var so the installed system
-// starts with the image's full /var content on first boot.
-fn populate_state_var(mnt_path: &Path) -> Result<()> {
+fn find_deploy_dir(mnt_path: &Path) -> Result<PathBuf> {
     let state_deploy = mnt_path.join("state/deploy");
     let mut entries: Vec<_> = fs::read_dir(&state_deploy)
         .with_context(|| format!("reading {}", state_deploy.display()))?
@@ -297,8 +301,7 @@ fn populate_state_var(mnt_path: &Path) -> Result<()> {
             entries.len()
         );
     }
-    let state_var = entries.remove(0).path().join("var");
-    run_cmd("cp", &["-ax", "/var/.", state_var.to_str().unwrap()])
+    Ok(entries.remove(0).path())
 }
 
 fn detect_image_ref() -> Result<String> {
