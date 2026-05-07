@@ -16,8 +16,17 @@ struct State {
     last_verified_manifest: Option<String>,
 }
 
+/// Add `docker://` transport prefix if the ref has no explicit transport.
+pub fn normalize_ref(image_ref: &str) -> String {
+    if image_ref.contains("://") {
+        image_ref.to_owned()
+    } else {
+        format!("docker://{image_ref}")
+    }
+}
+
 pub fn run(reboot: bool) -> Result<()> {
-    let image_ref = config::require_image_ref()?;
+    let image_ref = normalize_ref(&config::require_image_ref()?);
 
     println!("Pulling {image_ref} ...");
     cfsctl::run(&["oci", "pull", &image_ref])?;
