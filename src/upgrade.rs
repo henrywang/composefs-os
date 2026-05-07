@@ -41,7 +41,16 @@ pub fn run(reboot: bool) -> Result<()> {
     }
 
     println!("Preparing boot entry ...");
-    cfsctl::run(&["oci", "prepare-boot", "--bootdir", BOOT_DIR, &image_ref])?;
+    let cmdline = current_cmdline()?;
+    cfsctl::run(&[
+        "oci",
+        "prepare-boot",
+        "--bootdir",
+        BOOT_DIR,
+        "--cmdline",
+        &cmdline,
+        &image_ref,
+    ])?;
 
     write_state(&digest, manifest_digest.as_deref())?;
     println!("Boot entry written.");
@@ -52,6 +61,18 @@ pub fn run(reboot: bool) -> Result<()> {
         println!("Run 'systemctl reboot' to apply, or pass --reboot.");
         Ok(())
     }
+}
+
+/// Read the running kernel cmdline, stripping the composefs= token so
+/// cfsctl can append the new one for the upgraded image.
+fn current_cmdline() -> Result<String> {
+    let raw = fs::read_to_string("/proc/cmdline").context("reading /proc/cmdline")?;
+    let filtered = raw
+        .split_whitespace()
+        .filter(|tok| !tok.starts_with("composefs="))
+        .collect::<Vec<_>>()
+        .join(" ");
+    Ok(filtered)
 }
 
 fn write_state(digest: &str, manifest_digest: Option<&str>) -> Result<()> {
