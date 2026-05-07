@@ -226,6 +226,13 @@ fn install_inner(
         ),
     )?;
 
+    println!("==> Writing cbootc config");
+    fs::create_dir_all(mnt_path.join("etc/cbootc"))?;
+    fs::write(
+        mnt_path.join("etc/cbootc/config.toml"),
+        format!("[image]\nref = \"{image_ref}\"\n"),
+    )?;
+
     println!("==> Installing GRUB");
     let grub = grub_install_bin();
     let efi_dir_arg = format!("--efi-directory={}", efi_mnt.display());
