@@ -4,8 +4,9 @@
 # composefs-setup-root, dracut module), and cbootc. /etc and /var are left
 # intact so derived images can use dnf normally.
 #
-# Derived images must call 'RUN cfs-layout-apply' as their final step, then
-# copy the result into a FROM scratch stage. See examples/fedora/Containerfile.
+# Derived images require no special build steps — just FROM this image, install
+# packages, add LABEL containers.bootc=1, and build. The composefs layout
+# transformation happens at install time via 'cbootc install to-disk'.
 #
 # Build: podman build -t fedora-cfs-base:43 -f examples/fedora/Containerfile.base .
 
@@ -51,6 +52,7 @@ RUN dnf install -y \
         grub2-efi-x64 grub2-efi-x64-modules grub2-tools grub2-tools-minimal \
         shim-x64 efibootmgr \
         dracut \
+        skopeo \
         vim-minimal less \
     && dnf clean all --installroot /rootfs --use-host-config \
     && rm -rf /rootfs/var/cache/dnf /rootfs/var/log/dnf*
@@ -94,7 +96,7 @@ RUN echo 'ttyS0' >> /rootfs/etc/securetty
 
 # Disable SELinux — no policy installed in this minimal image
 RUN mkdir -p /rootfs/etc/selinux && \
-    printf 'SELINUX=disabled\nSELINUXTYPE=targeted\n' \
+    printf 'SELINUX=disabled\n' \
         > /rootfs/etc/selinux/config
 
 # ---------------------------------------------------------------------------
@@ -173,58 +175,23 @@ RUN systemctl --root /rootfs enable \
           /rootfs/usr/lib/systemd/system/systemd-firstboot.service
 
 # ---------------------------------------------------------------------------
-# cfs-layout-apply — run this as the last step in derived images
+# composefs-required filesystem structure
+# /sysroot — mount point for the underlying ext4 after switch_root
+# /home /opt /srv — conventional symlinks into /var
+# /var/home /var/opt /var/srv — targets for those symlinks
+# These are baked into the base image so derived images need no extra steps.
 # ---------------------------------------------------------------------------
-RUN cat > /rootfs/usr/bin/cfs-layout-apply <<'SCRIPT'
-#!/bin/bash
-# Apply composefs-rs filesystem layout adjustments.
-# Must be the last RUN in derived Containerfiles before FROM scratch.
-set -euo pipefail
-
-# Rebuild initramfs while /etc (and /etc/pki) are still intact,
-# picking up any kernel modules installed in the derived image.
-KVER=$(ls /usr/lib/modules | head -1)
-dracut --force --no-hostonly --kver "$KVER" \
-    --tmpdir /tmp \
-    --add "systemd systemd-initrd dbus base bash composefs" \
-    --add-drivers "overlay erofs loop virtio_blk virtio_pci vfat" \
-    --reproducible \
-    "/usr/lib/modules/$KVER/initramfs.img"
-
-# /etc → /usr/etc (factory). Can't mv: container runtime bind-mounts
-# /etc/hosts, /etc/hostname, /etc/resolv.conf into every build container.
-mkdir -p /usr/etc
-cp -a /etc/. /usr/etc/
-find /etc -mindepth 1 -maxdepth 1 \
-    ! -name hosts ! -name hostname ! -name resolv.conf \
-    -exec rm -rf {} +
-
-# /var → /usr/share/factory/var; /var becomes a runtime mount point
-mkdir -p /usr/share/factory
-mv /var /usr/share/factory/var
-mkdir /var
-
-# Recreate /var on first boot from the factory tree
-mkdir -p /usr/lib/tmpfiles.d
-printf 'q /var 0755 - - -\nC /var - - - - -\n' \
-    > /usr/lib/tmpfiles.d/00-var-factory.conf
-
-# Empty mount point required by composefs-rs
-mkdir -p /sysroot
-
-# Conventional top-level symlinks into /var
-mkdir -p /usr/share/factory/var/home \
-         /usr/share/factory/var/opt \
-         /usr/share/factory/var/srv
-rm -rf /home /opt /srv
-ln -sf var/home /home
-ln -sf var/opt  /opt
-ln -sf var/srv  /srv
-SCRIPT
-RUN chmod +x /rootfs/usr/bin/cfs-layout-apply
+RUN mkdir -p /rootfs/sysroot && \
+    mkdir -p /rootfs/var/home /rootfs/var/opt /rootfs/var/srv && \
+    rm -rf /rootfs/home /rootfs/opt /rootfs/srv && \
+    ln -sf var/home /rootfs/home && \
+    ln -sf var/opt  /rootfs/opt && \
+    ln -sf var/srv  /rootfs/srv
 
 # ---------------------------------------------------------------------------
-# Final stage — /etc and /var intact so derived images can use dnf
+# Final stage — /etc and /var intact so derived images can use dnf normally.
+# No cfs-layout-apply step is required in derived images; cbootc install
+# to-disk handles the composefs layout transformation at install time.
 # ---------------------------------------------------------------------------
 FROM scratch
 COPY --from=rootfs-builder /rootfs /

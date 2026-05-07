@@ -5,8 +5,6 @@ use std::io::Write as _;
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::thread;
-use std::time::Duration;
 
 #[derive(Subcommand)]
 pub enum InstallCommand {
@@ -132,8 +130,14 @@ fn install_inner(
 
     println!("==> Partitioning {dev_s}");
     sfdisk_gpt(dev)?;
-    let _ = Command::new("partprobe").arg(dev_s).status();
-    thread::sleep(Duration::from_secs(1));
+    // Update kernel's partition table view; udevadm settle handles bare-metal
+    // but inside a container the host's udev never writes to the container's
+    // private /dev.  ensure_partition_nodes() fills the gap via sysfs + mknod.
+    let _ = Command::new("partx").args(["-u", dev_s]).status();
+    let _ = Command::new("udevadm")
+        .args(["settle", "--timeout=5"])
+        .status();
+    ensure_partition_nodes(dev, 3)?;
 
     println!("==> Formatting filesystems");
     run_cmd("mkfs.fat", &["-F32", "-n", "EFI", efi_p.to_str().unwrap()])?;
@@ -172,6 +176,10 @@ fn install_inner(
         &[efi_p.to_str().unwrap(), efi_mnt.to_str().unwrap()],
     )?;
     mounts.push(efi_mnt.clone());
+
+    // cfsctl (via containers-image) needs /var/tmp for blob staging.
+    // The composefs image layout leaves /var empty; create the dir here.
+    fs::create_dir_all("/var/tmp").context("create /var/tmp")?;
 
     println!("==> Initializing composefs repo");
     let cfs_repo = mnt_path.join("composefs");
@@ -251,6 +259,9 @@ fn install_inner(
          blscfg\n",
     )?;
 
+    println!("==> Populating /var from image");
+    populate_state_var(mnt_path)?;
+
     println!("==> Syncing");
     Command::new("sync")
         .status()
@@ -262,6 +273,26 @@ fn install_inner(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+// cfsctl oci prepare-boot creates state/deploy/<digest>/var/ as an empty
+// directory. Populate it from the container's own /var so the installed system
+// starts with the image's full /var content on first boot.
+fn populate_state_var(mnt_path: &Path) -> Result<()> {
+    let state_deploy = mnt_path.join("state/deploy");
+    let mut entries: Vec<_> = fs::read_dir(&state_deploy)
+        .with_context(|| format!("reading {}", state_deploy.display()))?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .collect();
+    if entries.len() != 1 {
+        bail!(
+            "expected exactly one deployment in state/deploy, found {}",
+            entries.len()
+        );
+    }
+    let state_var = entries.remove(0).path().join("var");
+    run_cmd("cp", &["-ax", "/var/.", state_var.to_str().unwrap()])
+}
 
 fn detect_image_ref() -> Result<String> {
     let content = fs::read_to_string("/run/.containerenv")
@@ -315,9 +346,32 @@ fn part(dev: &Path, n: u8) -> PathBuf {
     }
 }
 
+// Inside a container the host udev never writes to the container's private /dev.
+// sysfs IS global (all mounts see the same kernel state), so we can read the
+// major:minor numbers from there and create the nodes ourselves with mknod.
+fn ensure_partition_nodes(dev: &Path, count: u8) -> Result<()> {
+    let dev_name = dev.file_name().unwrap().to_str().unwrap();
+    for i in 1..=count {
+        let part_dev = part(dev, i);
+        if part_dev.exists() {
+            continue;
+        }
+        let part_name = part_dev.file_name().unwrap().to_str().unwrap();
+        let sys_dev = format!("/sys/block/{dev_name}/{part_name}/dev");
+        let dev_nums = fs::read_to_string(&sys_dev).with_context(|| {
+            format!("sysfs entry for {part_name} not found — partition table re-read may have failed")
+        })?;
+        let (major, minor) = dev_nums
+            .trim()
+            .split_once(':')
+            .context("unexpected format in sysfs dev file")?;
+        run_cmd("mknod", &[part_dev.to_str().unwrap(), "b", major, minor])?;
+    }
+    Ok(())
+}
+
 fn sfdisk_gpt(dev: &Path) -> Result<()> {
     let mut child = Command::new("sfdisk")
-        .arg("--no-reread")
         .arg(dev)
         .stdin(Stdio::piped())
         .spawn()

@@ -1,21 +1,30 @@
 # Example derived image built on fedora-cfs-base:43.
 #
 # Pattern:
-#   1. FROM fedora-cfs-base:43 AS build
+#   1. FROM fedora-cfs-base:43
 #   2. Install packages, write config — /etc and /var are normal here
-#   3. RUN cfs-layout-apply   ← moves /etc→/usr/etc, /var→factory, rebuilds initramfs
-#   4. FROM scratch + COPY    ← clean final image
+#   3. Add LABEL containers.bootc=1
+#
+# No cfs-layout-apply or FROM scratch step needed. cbootc install to-disk
+# handles the composefs layout transformation at install time.
 #
 # Build:
 #   podman build -t fedora-cfs-base:43 -f examples/fedora/Containerfile.base .
 #   podman build -t my-fedora-cfs:latest -f examples/fedora/Containerfile .
-# Deploy:
-#   podman run --rm --privileged -v /dev:/dev my-fedora-cfs:latest \
-#       cbootc install to-disk /dev/vda --wipe
+# Deploy (physical disk):
+#   sudo podman run --rm --privileged \
+#       -v /dev:/dev -v /var/lib/containers:/var/lib/containers \
+#       -v /var/tmp:/var/tmp \
+#       my-fedora-cfs:latest cbootc install to-disk /dev/vda --wipe
+# Deploy (disk image file):
+#   sudo podman run --rm --privileged \
+#       -v $(pwd):/output -v /var/lib/containers:/var/lib/containers \
+#       -v /var/tmp:/var/tmp \
+#       my-fedora-cfs:latest cbootc install to-disk /output/disk.raw --size 10G
 
 # BASE_IMAGE can be overridden in CI to reference ghcr.io/…/fedora-cfs-base:43
 ARG BASE_IMAGE=fedora-cfs-base:43
-FROM ${BASE_IMAGE} AS build
+FROM ${BASE_IMAGE}
 
 # --- Customise below this line -------------------------------------------
 
@@ -33,12 +42,6 @@ RUN echo 'fedora-cfs' > /etc/hostname
 # RUN dnf install -y --setopt=install_weak_deps=False myapp && dnf clean all
 
 # --- Do not edit below this line ------------------------------------------
-
-# Apply composefs-rs filesystem layout — must be the last RUN before FROM scratch
-RUN cfs-layout-apply
-
-FROM scratch
-COPY --from=build / /
 
 LABEL containers.bootc=1
 LABEL composefs.backend=cfs-rs
