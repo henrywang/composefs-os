@@ -199,7 +199,7 @@ fn install_inner(
     )?;
 
     println!("==> Preparing boot entries");
-    let cmdline = format!("root=UUID={root_uuid} rootfstype={filesystem} rw console=ttyS0,115200");
+    let cmdline = format!("root=UUID={root_uuid} rootfstype={filesystem} ro console=ttyS0,115200");
     run_cmd(
         "cfsctl",
         &[
@@ -226,7 +226,7 @@ fn install_inner(
     fs::write(
         etc_upper.join("fstab"),
         format!(
-            "UUID={root_uuid}  /          {filesystem}  defaults  0 1\n\
+            "UUID={root_uuid}  /          {filesystem}  ro        0 1\n\
              UUID={boot_uuid}  /boot      ext4          defaults  0 2\n\
              UUID={efi_uuid}   /boot/efi  vfat          umask=0077,shortname=winnt  0 2\n"
         ),
