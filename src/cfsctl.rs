@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use std::process::Command;
 
-const REPO: &str = "/composefs";
+const REPO: &str = "/sysroot/composefs";
 
 fn base() -> Command {
     let mut cmd = Command::new("cfsctl");
