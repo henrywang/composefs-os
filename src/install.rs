@@ -199,7 +199,7 @@ fn install_inner(
     )?;
 
     println!("==> Preparing boot entries");
-    let cmdline = format!("root=UUID={root_uuid} rootfstype={filesystem} ro console=ttyS0,115200");
+    let cmdline = format!("root=UUID={root_uuid} rootfstype={filesystem} rw console=ttyS0,115200");
     run_cmd(
         "cfsctl",
         &[
