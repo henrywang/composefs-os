@@ -47,6 +47,8 @@ pub fn run(reboot: bool) -> Result<()> {
         "prepare-boot",
         "--bootdir",
         BOOT_DIR,
+        "--entry-id",
+        &digest,
         "--cmdline",
         &cmdline,
         &image_ref,
@@ -61,6 +63,8 @@ pub fn run(reboot: bool) -> Result<()> {
         fs::remove_dir(&deploy_var).context("removing new deployment var dir")?;
         symlink("../../var", &deploy_var).context("creating shared var symlink")?;
     }
+
+    carry_forward_etc(&digest)?;
 
     write_state(&digest, manifest_digest.as_deref())?;
     println!("Boot entry written.");
@@ -83,6 +87,53 @@ fn current_cmdline() -> Result<String> {
         .collect::<Vec<_>>()
         .join(" ");
     Ok(filtered)
+}
+
+/// Extract the composefs=<hash> token from /proc/cmdline, if present.
+fn current_composefs_digest() -> Option<String> {
+    let raw = fs::read_to_string("/proc/cmdline").ok()?;
+    raw.split_whitespace()
+        .find_map(|tok| tok.strip_prefix("composefs=").map(str::to_owned))
+}
+
+/// Carry /etc changes from the current deployment's overlayfs upper directory
+/// into the new deployment's upper directory, so user edits survive upgrades.
+///
+/// The overlayfs upper IS the diff between the image /etc and the running /etc,
+/// so copying it forward gives three-way-merge semantics:
+///   - user-modified file → in new upper → user version persists
+///   - image-only change  → not in upper → new image version shows through
+///   - conflict           → user version wins (same default as bootc)
+fn carry_forward_etc(new_digest: &str) -> Result<()> {
+    let Some(current_digest) = current_composefs_digest() else {
+        return Ok(());
+    };
+    if current_digest == new_digest {
+        return Ok(());
+    }
+
+    let old_upper = PathBuf::from("/sysroot/state/deploy")
+        .join(&current_digest)
+        .join("etc/upper");
+    let new_upper = PathBuf::from("/sysroot/state/deploy")
+        .join(new_digest)
+        .join("etc/upper");
+
+    if !old_upper.exists() || !new_upper.exists() {
+        return Ok(());
+    }
+
+    println!("Carrying forward /etc changes ...");
+    // -a preserves xattrs (overlayfs opaque markers) and device files (whiteouts)
+    let src = format!("{}/.", old_upper.display());
+    let status = Command::new("cp")
+        .args(["-a", &src, new_upper.to_str().unwrap()])
+        .status()
+        .context("cp etc/upper")?;
+    if !status.success() {
+        anyhow::bail!("failed to carry forward /etc changes");
+    }
+    Ok(())
 }
 
 fn write_state(digest: &str, manifest_digest: Option<&str>) -> Result<()> {

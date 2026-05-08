@@ -76,21 +76,23 @@ cbootc/
 
 ## Known Limitations
 
-### /etc changes are lost on upgrade
+### /etc conflict resolution on upgrade
 
-When `cbootc upgrade` stages a new image, the new deployment gets a fresh
-`/etc` overlay upper directory copied from the new image. Any files you edited
-in `/etc` on the running system (e.g. `/etc/hostname`, `/etc/ssh/sshd_config`)
-are in the **old** deployment's overlay and are not carried forward.
+`cbootc upgrade` carries your `/etc` edits forward by copying the current
+deployment's overlayfs upper directory into the new deployment's upper directory.
+This gives the following behaviour:
 
-[bootc](https://github.com/bootc-dev/bootc) solves this with a three-way
-`etc-merge`: it diffs the old image's `/etc` against the running `/etc` (to
-find your local edits), then re-applies those edits onto the new image's `/etc`.
-cbootc does not implement this yet.
+- **File you edited, image didn't** → your version persists ✓
+- **File image changed, you didn't** → new image version shows through ✓
+- **Both you and the image changed the same file** → your version wins
 
-**Workaround:** manage `/etc` changes via the container image. Put configuration
-in the `Containerfile` (e.g. `RUN echo 'myhost' > /etc/hostname`) so it is
-part of the image and survives every upgrade automatically.
+The last case is the same default as bootc. If you'd rather an image update win
+(e.g. after a security fix to a config file you've also customised), update your
+local copy manually after upgrading.
+
+**Tip:** for configuration that must be reproducible, bake it into the
+`Containerfile` (e.g. `RUN echo 'myhost' > /etc/hostname`) rather than editing
+the running system.
 
 ### No rollback support yet
 
