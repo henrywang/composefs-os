@@ -67,7 +67,9 @@ jobs:
             cbootc install to-disk /output/disk.raw --size 5G
 
       - name: Run e2e tests
-        run: python3 tests/e2e.py disk.raw
+        run: |
+          OVMF=$(find /usr/share -name 'OVMF_CODE*.fd' ! -name '*VARS*' | head -1)
+          python3 tests/e2e.py --ovmf "$OVMF" disk.raw
 
       - name: Upload disk image on failure
         if: failure()

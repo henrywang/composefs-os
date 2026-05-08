@@ -24,8 +24,9 @@ TIMEOUT_BOOT = 180
 TIMEOUT_CMD = 30
 
 OVMF_CANDIDATES = [
-    "/usr/share/edk2/ovmf/OVMF_CODE.fd",
-    "/usr/share/OVMF/OVMF_CODE.fd",
+    "/usr/share/edk2/ovmf/OVMF_CODE.fd",       # Fedora
+    "/usr/share/OVMF/OVMF_CODE.fd",             # Ubuntu ≤23.10
+    "/usr/share/OVMF/OVMF_CODE_4M.fd",          # Ubuntu 24.04+
     "/usr/share/ovmf/OVMF_CODE.fd",
 ]
 
