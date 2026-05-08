@@ -23,7 +23,7 @@ RUN cargo build --release
 # Stage 0b: Build composefs-rs tools (cfsctl + composefs-setup-root)
 # ---------------------------------------------------------------------------
 FROM rust:1-slim AS composefs-builder
-RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y git pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 RUN git clone --depth=1 https://github.com/containers/composefs-rs .
 RUN cargo build --release -p composefs-ctl && \
