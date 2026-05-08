@@ -28,13 +28,6 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Login to ghcr.io
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       # Build the base image from source (covers PRs that change Containerfile.base
       # or the Rust code compiled inside it). Layer cache keeps this fast after
       # the first run.
@@ -45,14 +38,19 @@ jobs:
           file: Containerfile.base
           push: false
           load: true
-          tags: composefs-os-fedora:pr
+          tags: composefs-os:fedora-43
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Transfer from Docker daemon to podman storage so podman can reference
+      # it as localhost/composefs-os:fedora-43.
+      - name: Load base image into podman
+        run: docker save composefs-os:fedora-43 | podman load
 
       - name: Build test image
         run: |
           podman build \
-            --build-arg BASE_IMAGE=composefs-os-fedora:pr \
+            --build-arg BASE_IMAGE=localhost/composefs-os:fedora-43 \
             -t composefs-os-test:latest \
             -f examples/fedora/Containerfile .
 

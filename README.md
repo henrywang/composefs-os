@@ -21,7 +21,7 @@ See [DESIGN.md](DESIGN.md) for rationale and architecture.
 
 | Image | Status |
 |-------|--------|
-| `ghcr.io/henrywang/composefs-os-fedora:43` | Working |
+| `ghcr.io/henrywang/composefs-os:fedora-43` | Working |
 | Ubuntu | Planned |
 | Arch Linux | Planned |
 
@@ -34,7 +34,7 @@ sudo podman run --rm --privileged \
     -v $(pwd):/output \
     -v /var/lib/containers:/var/lib/containers \
     -v /var/tmp:/var/tmp \
-    ghcr.io/henrywang/composefs-os-fedora:43 \
+    ghcr.io/henrywang/composefs-os:fedora-43 \
     cbootc install to-disk /output/disk.raw --size 10G
 
 # Boot it
@@ -50,7 +50,7 @@ The published base images are a starting point. Add your own packages and
 configuration in a derived `Containerfile`:
 
 ```dockerfile
-FROM ghcr.io/henrywang/composefs-os-fedora:43
+FROM ghcr.io/henrywang/composefs-os:fedora-43
 
 # Add packages
 RUN dnf install -y vim htop && dnf clean all
@@ -80,7 +80,7 @@ cbootc rollback
 systemctl reboot
 
 # Switch to a different image
-cbootc switch docker://ghcr.io/henrywang/composefs-os-fedora:43
+cbootc switch docker://ghcr.io/henrywang/composefs-os:fedora-43
 ```
 
 The tracked image reference is stored in `/var/lib/cbootc/config.toml` and

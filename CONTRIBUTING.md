@@ -23,7 +23,7 @@ cargo clippy -- -D warnings
 
 ```sh
 # Base image (slow — runs dnf + dracut inside the container)
-podman build -t fedora-cfs-base:43 -f Containerfile.base .
+podman build -t composefs-os:fedora-43 -f Containerfile.base .
 
 # Derived image (fast — no special steps required)
 podman build -t my-fedora-cfs:latest -f examples/fedora/Containerfile .
@@ -32,7 +32,7 @@ podman build -t my-fedora-cfs:latest -f examples/fedora/Containerfile .
 Custom images need no `cfs-layout-apply` or `FROM scratch` step. The pattern is:
 
 ```dockerfile
-FROM fedora-cfs-base:43
+FROM composefs-os:fedora-43
 RUN dnf install -y myapp && dnf clean all
 LABEL containers.bootc=1
 CMD ["/sbin/init"]
