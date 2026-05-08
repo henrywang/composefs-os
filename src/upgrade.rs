@@ -106,9 +106,9 @@ pub fn patch_bls_entry(bootdir: &Path, digest: &str, image_ref: &str) -> Result<
         .lines()
         .map(|line| {
             if line.starts_with("title ") {
-                format!("title {short}")
+                format!("title {short} {date} ({digest_short})")
             } else if line.starts_with("version ") {
-                format!("version {date} ({digest_short})")
+                format!("version {digest_short}")
             } else {
                 line.to_string()
             }
