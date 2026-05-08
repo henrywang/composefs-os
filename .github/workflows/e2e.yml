@@ -1,0 +1,77 @@
+name: E2E Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q \
+            qemu-system-x86 ovmf podman python3-pexpect
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Build the base image from source (covers PRs that change Containerfile.base
+      # or the Rust code compiled inside it). Layer cache keeps this fast after
+      # the first run.
+      - name: Build base image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Containerfile.base
+          push: false
+          load: true
+          tags: composefs-os-fedora:pr
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build test image
+        run: |
+          podman build \
+            --build-arg BASE_IMAGE=composefs-os-fedora:pr \
+            -t composefs-os-test:latest \
+            -f examples/fedora/Containerfile .
+
+      - name: Install to disk image
+        run: |
+          sudo podman run --rm --privileged \
+            -v ${{ github.workspace }}:/output \
+            -v /var/lib/containers:/var/lib/containers \
+            -v /var/tmp:/var/tmp \
+            composefs-os-test:latest \
+            cbootc install to-disk /output/disk.raw --size 5G
+
+      - name: Run e2e tests
+        run: python3 tests/e2e.py disk.raw
+
+      - name: Upload disk image on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: disk-raw
+          path: disk.raw
+          retention-days: 1

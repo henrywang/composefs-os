@@ -1,13 +1,13 @@
 # Template for a custom Fedora composefs-os image.
 #
 # Pattern:
-#   1. FROM ghcr.io/OWNER/composefs-os-fedora:43
+#   1. FROM ghcr.io/henrywang/composefs-os-fedora:43
 #   2. Install packages, write config — /etc and /var are normal here
 #   3. Keep the LABEL block at the bottom
 #
 # Build locally:
 #   podman build -t my-fedora-cfs:latest \
-#       --build-arg BASE_IMAGE=ghcr.io/OWNER/composefs-os-fedora:43 \
+#       --build-arg BASE_IMAGE=ghcr.io/henrywang/composefs-os-fedora:43 \
 #       -f examples/fedora/Containerfile .
 #
 # Deploy to a disk image file:
@@ -16,13 +16,18 @@
 #       -v /var/tmp:/var/tmp \
 #       my-fedora-cfs:latest cbootc install to-disk /output/disk.raw --size 10G
 
-ARG BASE_IMAGE=ghcr.io/OWNER/composefs-os-fedora:43
+ARG BASE_IMAGE=ghcr.io/henrywang/composefs-os-fedora:43
 FROM ${BASE_IMAGE}
 
 # --- Customise below this line -------------------------------------------
 
-# Set hostname
 RUN echo 'myhost' > /etc/hostname
+
+# Serial console autologin — convenient for local QEMU testing.
+# Remove or replace with SSH keys for any internet-facing deployment.
+RUN mkdir -p /usr/lib/systemd/system/serial-getty@ttyS0.service.d && \
+    printf '[Service]\nExecStart=\nExecStart=-/sbin/agetty --autologin root --noclear %%I 115200 vt220\n' \
+        > /usr/lib/systemd/system/serial-getty@ttyS0.service.d/autologin.conf
 
 # Add your packages here, e.g.:
 # RUN dnf install -y --setopt=install_weak_deps=False vim htop && dnf clean all

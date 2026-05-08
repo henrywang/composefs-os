@@ -21,11 +21,10 @@ See [DESIGN.md](DESIGN.md) for rationale and architecture.
 
 | Image | Status |
 |-------|--------|
-| `ghcr.io/OWNER/composefs-os-fedora:43` | Working |
+| `ghcr.io/henrywang/composefs-os-fedora:43` | Working |
 | Ubuntu | Planned |
 | Arch Linux | Planned |
 
-Replace `OWNER` with the GitHub organisation or username hosting the packages.
 
 ## Quick Start
 
@@ -35,7 +34,7 @@ sudo podman run --rm --privileged \
     -v $(pwd):/output \
     -v /var/lib/containers:/var/lib/containers \
     -v /var/tmp:/var/tmp \
-    ghcr.io/OWNER/composefs-os-fedora:43 \
+    ghcr.io/henrywang/composefs-os-fedora:43 \
     cbootc install to-disk /output/disk.raw --size 10G
 
 # Boot it
@@ -51,7 +50,7 @@ The published base images are a starting point. Add your own packages and
 configuration in a derived `Containerfile`:
 
 ```dockerfile
-FROM ghcr.io/OWNER/composefs-os-fedora:43
+FROM ghcr.io/henrywang/composefs-os-fedora:43
 
 # Add packages
 RUN dnf install -y vim htop && dnf clean all
@@ -81,7 +80,7 @@ cbootc rollback
 systemctl reboot
 
 # Switch to a different image
-cbootc switch docker://ghcr.io/OWNER/composefs-os-fedora:43
+cbootc switch docker://ghcr.io/henrywang/composefs-os-fedora:43
 ```
 
 The tracked image reference is stored in `/var/lib/cbootc/config.toml` and
@@ -105,10 +104,11 @@ composefs-os/
     ubuntu/
       Containerfile          Ubuntu (stub — not yet functional)
   tests/
-    INTEGRATION.md           Manual integration test checklist
+    e2e.py                   QEMU-based end-to-end test suite
   .github/workflows/
     ci.yml                   Rust build, test, lint
     container.yml            Build and push base image to ghcr.io
+    e2e.yml                  End-to-end tests (boots in QEMU)
 ```
 
 ## Known Limitations
