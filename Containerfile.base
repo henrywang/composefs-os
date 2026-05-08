@@ -26,7 +26,7 @@ FROM rust:1-slim AS composefs-builder
 RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 RUN git clone --depth=1 https://github.com/containers/composefs-rs .
-RUN cargo build --release -p cfsctl && \
+RUN cargo build --release -p composefs-ctl && \
     cargo build --release -p composefs-setup-root --no-default-features
 
 # ---------------------------------------------------------------------------
