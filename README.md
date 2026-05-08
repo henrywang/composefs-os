@@ -23,7 +23,7 @@ See [DESIGN.md](DESIGN.md) for full design rationale.
 
 ```sh
 # Build the base image (slow — dnf + dracut inside the container)
-podman build -t fedora-cfs-base:43 -f examples/fedora/Containerfile.base .
+podman build -t fedora-cfs-base:43 -f Containerfile.base .
 
 # Build a derived image (fast)
 podman build -t my-fedora-cfs:latest -f examples/fedora/Containerfile .
@@ -64,13 +64,13 @@ upgrades. The `cbootc-update.timer` (enabled in the base image) runs
 
 ```
 cbootc/
+  Containerfile.base         Builds the bootable Fedora 43 base image
   src/                       Rust source
   units/
     cbootc-update.service    Systemd service for automatic upgrades
     cbootc-update.timer      Systemd timer (daily, randomised delay)
   examples/
     fedora/
-      Containerfile.base     Builds the bootable Fedora 43 base image
       Containerfile          Example derived image (your customisations go here)
 ```
 

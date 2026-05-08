@@ -23,7 +23,7 @@ cargo clippy -- -D warnings
 
 ```sh
 # Base image (slow — runs dnf + dracut inside the container)
-podman build -t fedora-cfs-base:43 -f examples/fedora/Containerfile.base .
+podman build -t fedora-cfs-base:43 -f Containerfile.base .
 
 # Derived image (fast — no special steps required)
 podman build -t my-fedora-cfs:latest -f examples/fedora/Containerfile .
