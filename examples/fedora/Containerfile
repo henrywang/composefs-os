@@ -1,52 +1,37 @@
-# Example derived image built on fedora-cfs-base:43.
+# Template for a custom Fedora composefs-os image.
 #
 # Pattern:
-#   1. FROM fedora-cfs-base:43
+#   1. FROM ghcr.io/OWNER/composefs-os-fedora:43
 #   2. Install packages, write config — /etc and /var are normal here
-#   3. Add LABEL containers.bootc=1
+#   3. Keep the LABEL block at the bottom
 #
-# No cfs-layout-apply or FROM scratch step needed. cbootc install to-disk
-# handles the composefs layout transformation at install time.
+# Build locally:
+#   podman build -t my-fedora-cfs:latest \
+#       --build-arg BASE_IMAGE=ghcr.io/OWNER/composefs-os-fedora:43 \
+#       -f examples/fedora/Containerfile .
 #
-# Build:
-#   podman build -t fedora-cfs-base:43 -f examples/fedora/Containerfile.base .
-#   podman build -t my-fedora-cfs:latest -f examples/fedora/Containerfile .
-# Deploy (physical disk):
-#   sudo podman run --rm --privileged \
-#       -v /dev:/dev -v /var/lib/containers:/var/lib/containers \
-#       -v /var/tmp:/var/tmp \
-#       my-fedora-cfs:latest cbootc install to-disk /dev/vda --wipe
-# Deploy (disk image file):
+# Deploy to a disk image file:
 #   sudo podman run --rm --privileged \
 #       -v $(pwd):/output -v /var/lib/containers:/var/lib/containers \
 #       -v /var/tmp:/var/tmp \
 #       my-fedora-cfs:latest cbootc install to-disk /output/disk.raw --size 10G
 
-# BASE_IMAGE can be overridden in CI to reference ghcr.io/…/fedora-cfs-base:43
-ARG BASE_IMAGE=fedora-cfs-base:43
+ARG BASE_IMAGE=ghcr.io/OWNER/composefs-os-fedora:43
 FROM ${BASE_IMAGE}
 
 # --- Customise below this line -------------------------------------------
 
-# Root password — REMOVE FOR PRODUCTION, use SSH keys instead
-RUN echo 'root:fedora' | chpasswd
+# Set hostname
+RUN echo 'myhost' > /etc/hostname
 
-# Serial console autologin — REMOVE FOR PRODUCTION
-RUN mkdir -p /usr/lib/systemd/system/serial-getty@ttyS0.service.d && \
-    printf '[Service]\nExecStart=\nExecStart=-/sbin/agetty --autologin root --noclear %%I 115200,38400,9600 vt220\n' \
-        > /usr/lib/systemd/system/serial-getty@ttyS0.service.d/autologin.conf
-
-RUN echo 'fedora-cfs' > /etc/hostname
-
-# Add your own packages here:
-# RUN dnf install -y --setopt=install_weak_deps=False myapp && dnf clean all
+# Add your packages here, e.g.:
+# RUN dnf install -y --setopt=install_weak_deps=False vim htop && dnf clean all
 
 # --- Do not edit below this line ------------------------------------------
 
 LABEL containers.bootc=1
 LABEL composefs.backend=cfs-rs
-LABEL org.opencontainers.image.title="Fedora CFS (example)"
-LABEL org.opencontainers.image.description="Example composefs-rs bootable Fedora 43 image"
+LABEL org.opencontainers.image.title="My Fedora composefs-os image"
 LABEL org.opencontainers.image.version="43"
 
 CMD ["/sbin/init"]

@@ -1,39 +1,41 @@
-# cbootc
+# composefs-os
 
-A minimal bootc-like tool for systems running on composefs-rs. Personal-scale,
-distro-neutral, deliberately small.
+Bootable Linux system images built on [composefs-rs](https://github.com/containers/composefs-rs).
+Image-based OS management for personal and small-scale systems — no ostree, no fleet tooling.
 
 ## What This Is
 
-cbootc deploys and updates Linux systems built as OCI container images, using
-[composefs-rs](https://github.com/containers/composefs-rs) (via `cfsctl`) as
-the storage backend. It is a thin operational layer above cfsctl: install,
-status, upgrade, switch, rollback, signature verification, and a systemd timer
-for automatic updates.
+composefs-os publishes OCI container images that boot directly via a composefs
+overlay filesystem. Each image ships `cbootc`, a small embedded tool that
+handles upgrades, rollbacks, and image switching from within the running system.
 
 It is **not**:
 
-- A general-purpose bootc replacement (use [bootc](https://github.com/bootc-dev/bootc))
-- An ostree-compatible tool (no ostree code)
+- A general-purpose [bootc](https://github.com/bootc-dev/bootc) replacement
+- An ostree-compatible tool
 - A fleet management system
 
-See [DESIGN.md](DESIGN.md) for full design rationale.
+See [DESIGN.md](DESIGN.md) for rationale and architecture.
+
+## Available Images
+
+| Image | Status |
+|-------|--------|
+| `ghcr.io/OWNER/composefs-os-fedora:43` | Working |
+| Ubuntu | Planned |
+| Arch Linux | Planned |
+
+Replace `OWNER` with the GitHub organisation or username hosting the packages.
 
 ## Quick Start
 
 ```sh
-# Build the base image (slow — dnf + dracut inside the container)
-podman build -t fedora-cfs-base:43 -f Containerfile.base .
-
-# Build a derived image (fast)
-podman build -t my-fedora-cfs:latest -f examples/fedora/Containerfile .
-
 # Install to a raw disk image (run from inside the container, needs --privileged)
 sudo podman run --rm --privileged \
     -v $(pwd):/output \
     -v /var/lib/containers:/var/lib/containers \
     -v /var/tmp:/var/tmp \
-    my-fedora-cfs:latest \
+    ghcr.io/OWNER/composefs-os-fedora:43 \
     cbootc install to-disk /output/disk.raw --size 10G
 
 # Boot it
@@ -43,35 +45,70 @@ qemu-system-x86_64 -enable-kvm -m 4096 \
     -nographic
 ```
 
-## Upgrading a Running System
+## Building a Custom Image
+
+The published base images are a starting point. Add your own packages and
+configuration in a derived `Containerfile`:
+
+```dockerfile
+FROM ghcr.io/OWNER/composefs-os-fedora:43
+
+# Add packages
+RUN dnf install -y vim htop && dnf clean all
+
+# Bake in configuration that must survive upgrades
+RUN echo 'myhost' > /etc/hostname
+```
+
+Use `examples/fedora/Containerfile` as a full template.
+
+## In-System Management
+
+Once booted, `cbootc` manages the system:
 
 ```sh
-# Point the system at a registry image
-cbootc switch docker://ghcr.io/you/my-fedora-cfs:latest
+# Show current deployment status
+cbootc status
 
-# Pull latest and stage new boot entry
+# Pull the latest image and stage a new boot entry
 cbootc upgrade
 
 # Reboot to apply
 systemctl reboot
+
+# Roll back to the previous deployment
+cbootc rollback
+systemctl reboot
+
+# Switch to a different image
+cbootc switch docker://ghcr.io/OWNER/composefs-os-fedora:43
 ```
 
-The image reference is persisted in `/var/lib/cbootc/config.toml` and survives
-upgrades. The `cbootc-update.timer` (enabled in the base image) runs
+The tracked image reference is stored in `/var/lib/cbootc/config.toml` and
+survives upgrades. `cbootc-update.timer` (enabled in the base image) runs
 `cbootc upgrade` daily with a randomised delay.
 
 ## Repository Layout
 
 ```
-cbootc/
+composefs-os/
   Containerfile.base         Builds the bootable Fedora 43 base image
-  src/                       Rust source
+  src/                       cbootc source (Rust)
   units/
     cbootc-update.service    Systemd service for automatic upgrades
     cbootc-update.timer      Systemd timer (daily, randomised delay)
   examples/
     fedora/
-      Containerfile          Example derived image (your customisations go here)
+      Containerfile          Template for derived Fedora images
+    arch/
+      Containerfile          Arch Linux (stub — not yet functional)
+    ubuntu/
+      Containerfile          Ubuntu (stub — not yet functional)
+  tests/
+    INTEGRATION.md           Manual integration test checklist
+  .github/workflows/
+    ci.yml                   Rust build, test, lint
+    container.yml            Build and push base image to ghcr.io
 ```
 
 ## Known Limitations
@@ -107,9 +144,9 @@ are not pruned automatically. Remove them manually when disk space is a concern.
 
 ### x86-64 only
 
-The GRUB install step (`grub2-install --target=x86_64-efi`) is hard-coded to
-x86-64 EFI. aarch64 and other architectures are not supported.
+The GRUB install step is hard-coded to `--target=x86_64-efi`.
+aarch64 and other architectures are not supported.
 
 ## License
 
-MIT — see [LICENSE](LICENSE) (if present) or SPDX identifier in source files.
+MIT — see [LICENSE](LICENSE).

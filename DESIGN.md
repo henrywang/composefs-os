@@ -1,12 +1,13 @@
-# cbootc Design Notes
+# composefs-os / cbootc Design Notes
 
-A minimal bootc-like operational tool built directly on composefs-rs, with no
-ostree dependency. Intended as a personal-scale tool, not a bootc replacement.
+composefs-os ships bootable Linux OCI images backed by composefs-rs.
+cbootc is the embedded upgrade/rollback tool inside those images — a minimal
+bootc-like operational layer with no ostree dependency.
 
 ## Status
 
-Greenfield. No code yet. This document captures the design decisions made
-during initial scoping so we can pick up implementation cleanly.
+Working implementation. All core commands (install, upgrade, switch, rollback,
+status, verify) are functional on x86-64 EFI systems.
 
 ## Goals
 
@@ -104,21 +105,21 @@ Signature verification before deploy, using `sigstore-rs` or by shelling out
 to `cosign verify`. Enforced when a public key is configured; warning-only
 when none is. Configuration via `/etc/cbootc/config.toml`.
 
-### 7. Rollback via grub-reboot, not state machines
+### 7. Rollback via grubenv next_entry, not state machines
 
 Rather than tracking deployment generations in custom state, lean on the BLS
-entries cfsctl writes. Rollback = "boot the previous BLS entry once" via
-`grub2-reboot` or equivalent. Simple, debuggable, no custom state to corrupt.
+entries cfsctl writes. Rollback = write `next_entry=<digest>` to
+`/boot/grub2/grubenv` via `grub2-editenv`, then reboot. GRUB reads the env,
+boots that entry once, and clears it. Simple, debuggable, no custom state to
+corrupt.
 
-### 8. No installer in the binary
+### 8. Installer in the binary
 
-`cbootc install` is out of scope for the binary itself. Installation is done
-by the disk-builder script (see `tools/build-disk.sh`) which produces a
-qcow2/raw image. For bare-metal install, boot a live environment and run that
-script against `/dev/sdX` instead of a disk image file.
-
-This is the single biggest scope cut vs. bootc and is what makes cbootc
-buildable in weeks rather than months.
+`cbootc install to-disk <DEVICE>` runs inside the container image and writes a
+bootable system to a block device or raw file. It handles partitioning (GPT,
+via sfdisk), formatting, composefs repo initialisation, GRUB installation, and
+shared-var wiring. Running inside the container means the source image is always
+the container itself — no separate image reference needed at install time.
 
 ## Command Surface
 
@@ -135,10 +136,11 @@ That's it. Five commands. Compare to bootc's ~15.
 ## File Layout on Target System
 
 ```
-/composefs/                          cfsctl repo (objects, images, streams)
+/sysroot/composefs/                  cfsctl repo (objects, images, streams)
 /boot/                               kernel + initramfs + BLS entries
-/boot/loader/entries/*.conf          BLS snippets with composefs=<digest>
-/etc/cbootc/config.toml              tracked image, signing key, update policy
+/boot/loader/entries/<digest>.conf   BLS snippet with composefs=<digest>
+/boot/grub2/grubenv                  GRUB env block (next_entry for rollback)
+/var/lib/cbootc/config.toml          tracked image reference
 /var/lib/cbootc/state.json           last-upgrade time, last-known-good digest
 /usr/lib/systemd/system/cbootc-*     timer + service for auto-updates (optional)
 ```
