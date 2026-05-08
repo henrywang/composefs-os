@@ -261,16 +261,26 @@ fn install_inner(
     fs::create_dir_all(&grub2_dir)?;
     fs::write(
         grub2_dir.join("grub.cfg"),
-        "set timeout=3\n\
-         serial --unit=0 --speed=115200\n\
+        "serial --unit=0 --speed=115200\n\
          terminal_input serial console\n\
          terminal_output serial console\n\
+         load_env\n\
+         if [ \"${next_entry}\" ] ; then\n\
+           set default=\"${next_entry}\"\n\
+           set next_entry=\n\
+           save_env next_entry\n\
+         fi\n\
+         set timeout=3\n\
          insmod ext2\n\
          insmod all_video\n\
          function load_video { true; }\n\
          insmod blscfg\n\
          blscfg\n",
     )?;
+
+    println!("==> Creating grubenv");
+    let grubenv = grub2_dir.join("grubenv");
+    grub_editenv_create(grubenv.to_str().unwrap())?;
 
     println!("==> Populating /var from image");
     let shared_var = mnt_path.join("state/var");
@@ -422,6 +432,18 @@ fn grub_install_bin() -> &'static str {
     } else {
         "grub-install"
     }
+}
+
+fn grub_editenv_create(path: &str) -> Result<()> {
+    for cmd in &["grub2-editenv", "grub-editenv"] {
+        match Command::new(cmd).args([path, "create"]).status() {
+            Ok(s) if s.success() => return Ok(()),
+            Ok(s) => bail!("{cmd} create: exited {s}"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e).with_context(|| format!("spawning {cmd}")),
+        }
+    }
+    bail!("neither grub2-editenv nor grub-editenv found in PATH")
 }
 
 fn run_cmd(program: &str, args: &[&str]) -> Result<()> {

@@ -94,10 +94,16 @@ local copy manually after upgrading.
 `Containerfile` (e.g. `RUN echo 'myhost' > /etc/hostname`) rather than editing
 the running system.
 
-### No rollback support yet
+### Rollback
 
-`cbootc rollback` is stubbed but not implemented. If an upgrade fails to boot,
-use the GRUB menu to select the previous BLS boot entry manually.
+`cbootc rollback` selects the previous deployment for the next boot by writing
+`next_entry` to `/boot/grub2/grubenv`. Run `systemctl reboot` to apply it.
+
+If rollback itself fails to boot, use the GRUB menu to select the older BLS
+entry manually — each deployment keeps its own entry in `/boot/loader/entries/`.
+
+Old deployment boot files (`/boot/<digest>/`) accumulate across upgrades and
+are not pruned automatically. Remove them manually when disk space is a concern.
 
 ### x86-64 only
 

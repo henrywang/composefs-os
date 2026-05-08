@@ -64,16 +64,19 @@ fn entry_id(path: &Path) -> &str {
     path.file_stem().and_then(|s| s.to_str()).unwrap_or("")
 }
 
-fn grub_reboot(id: &str) -> Result<()> {
-    for cmd in &["grub2-reboot", "grub-reboot"] {
-        match Command::new(cmd).arg(id).status() {
+const GRUBENV: &str = "/boot/grub2/grubenv";
+
+fn set_next_entry(id: &str) -> Result<()> {
+    let next = format!("next_entry={id}");
+    for cmd in &["grub2-editenv", "grub-editenv"] {
+        match Command::new(cmd).args([GRUBENV, "set", &next]).status() {
             Ok(status) if status.success() => return Ok(()),
-            Ok(status) => bail!("{cmd} {id}: exited {status}"),
+            Ok(status) => bail!("{cmd}: exited {status}"),
             Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
             Err(e) => return Err(e).with_context(|| format!("spawning {cmd}")),
         }
     }
-    bail!("neither grub2-reboot nor grub-reboot found in PATH")
+    bail!("neither grub2-editenv nor grub-editenv found in PATH")
 }
 
 pub fn run() -> Result<()> {
@@ -88,16 +91,16 @@ pub fn run() -> Result<()> {
         bail!("no previous composefs deployment found in {ENTRIES_DIR}");
     }
 
-    // Most-recently written entry = what the last prepare-boot produced.
+    // Most-recently written entry = the last prepare-boot ran before this one.
+    // BLS entries are named <digest>.conf (set via --entry-id in cfsctl),
+    // so the file stem matches the GRUB menu entry id that blscfg creates.
     entries.sort_by_key(|e| e.mtime);
     let previous = entries.last().unwrap();
 
     let id = entry_id(&previous.path);
-    // cfsctl names BLS entries after the kernel version (e.g. "6.12.3-200.fc41.x86_64.conf"),
-    // so the file stem is what grub2-reboot/grub-reboot expects as its entry identifier.
-    grub_reboot(id)?;
+    set_next_entry(id)?;
 
-    println!("Next boot will use {}.", previous.composefs_digest);
+    println!("Next boot will use deployment {}.", previous.composefs_digest);
     println!("Run 'systemctl reboot' to apply.");
     Ok(())
 }
