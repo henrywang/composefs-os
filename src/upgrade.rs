@@ -54,6 +54,8 @@ pub fn run(reboot: bool) -> Result<()> {
         &image_ref,
     ])?;
 
+    patch_bls_entry(&digest, &image_ref)?;
+
     // Wire the new deployment's var to the shared /sysroot/state/var so
     // /var content survives upgrades.
     let deploy_var = PathBuf::from("/sysroot/state/deploy")
@@ -75,6 +77,48 @@ pub fn run(reboot: bool) -> Result<()> {
         println!("Run 'systemctl reboot' to apply, or pass --reboot.");
         Ok(())
     }
+}
+
+/// Rewrite the title and version lines in the BLS entry so the GRUB menu
+/// shows something useful instead of the hardcoded "todoOS / 0-todo" from cfsctl.
+fn patch_bls_entry(digest: &str, image_ref: &str) -> Result<()> {
+    let entry_path = PathBuf::from(BOOT_DIR)
+        .join("loader/entries")
+        .join(format!("{digest}.conf"));
+    if !entry_path.exists() {
+        return Ok(());
+    }
+    let content =
+        fs::read_to_string(&entry_path).with_context(|| format!("reading {}", entry_path.display()))?;
+
+    // "docker://ghcr.io/user/image:tag" → "image:tag"
+    let short = image_ref
+        .rsplit("://")
+        .next()
+        .unwrap_or(image_ref)
+        .rsplit('/')
+        .next()
+        .unwrap_or(image_ref);
+    let digest_short = &digest[..digest.len().min(12)];
+    let date = Utc::now().format("%Y-%m-%d").to_string();
+
+    let patched = content
+        .lines()
+        .map(|line| {
+            if line.starts_with("title ") {
+                format!("title {short}")
+            } else if line.starts_with("version ") {
+                format!("version {date} ({digest_short})")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+
+    fs::write(&entry_path, patched)
+        .with_context(|| format!("writing {}", entry_path.display()))
 }
 
 /// Read the running kernel cmdline, stripping the composefs= token so
