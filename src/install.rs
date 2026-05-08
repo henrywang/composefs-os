@@ -2,8 +2,8 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use std::fs;
 use std::io::Write as _;
-use std::os::unix::fs::symlink;
 use std::os::unix::fs::FileTypeExt;
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -401,7 +401,9 @@ fn ensure_partition_nodes(dev: &Path, count: u8) -> Result<()> {
         let part_name = part_dev.file_name().unwrap().to_str().unwrap();
         let sys_dev = format!("/sys/block/{dev_name}/{part_name}/dev");
         let dev_nums = fs::read_to_string(&sys_dev).with_context(|| {
-            format!("sysfs entry for {part_name} not found — partition table re-read may have failed")
+            format!(
+                "sysfs entry for {part_name} not found — partition table re-read may have failed"
+            )
         })?;
         let (major, minor) = dev_nums
             .trim()

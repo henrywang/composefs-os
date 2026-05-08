@@ -88,8 +88,8 @@ pub fn patch_bls_entry(bootdir: &Path, digest: &str, image_ref: &str) -> Result<
     if !entry_path.exists() {
         return Ok(());
     }
-    let content =
-        fs::read_to_string(&entry_path).with_context(|| format!("reading {}", entry_path.display()))?;
+    let content = fs::read_to_string(&entry_path)
+        .with_context(|| format!("reading {}", entry_path.display()))?;
 
     // "docker://ghcr.io/user/image:tag" → "image:tag"
     let short = image_ref
@@ -117,8 +117,7 @@ pub fn patch_bls_entry(bootdir: &Path, digest: &str, image_ref: &str) -> Result<
         .join("\n")
         + "\n";
 
-    fs::write(&entry_path, patched)
-        .with_context(|| format!("writing {}", entry_path.display()))
+    fs::write(&entry_path, patched).with_context(|| format!("writing {}", entry_path.display()))
 }
 
 /// Read the running kernel cmdline, stripping the composefs= token so

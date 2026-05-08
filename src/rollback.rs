@@ -100,7 +100,10 @@ pub fn run() -> Result<()> {
     let id = entry_id(&previous.path);
     set_next_entry(id)?;
 
-    println!("Next boot will use deployment {}.", previous.composefs_digest);
+    println!(
+        "Next boot will use deployment {}.",
+        previous.composefs_digest
+    );
     println!("Run 'systemctl reboot' to apply.");
     Ok(())
 }
