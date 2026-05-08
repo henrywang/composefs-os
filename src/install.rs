@@ -200,6 +200,17 @@ fn install_inner(
     )?;
 
     println!("==> Preparing boot entries");
+    let digest = run_cmd_output(
+        "cfsctl",
+        &[
+            "--repo",
+            cfs_repo.to_str().unwrap(),
+            "oci",
+            "compute-id",
+            "--bootable",
+            image_ref,
+        ],
+    )?;
     let cmdline = format!("root=UUID={root_uuid} rootfstype={filesystem} rw console=ttyS0,115200");
     run_cmd(
         "cfsctl",
@@ -210,11 +221,14 @@ fn install_inner(
             "prepare-boot",
             "--bootdir",
             boot_mnt.to_str().unwrap(),
+            "--entry-id",
+            &digest,
             "--cmdline",
             cmdline.as_str(),
             image_ref,
         ],
     )?;
+    crate::upgrade::patch_bls_entry(&boot_mnt, &digest, image_ref)?;
 
     // cfsctl oci prepare-boot creates state/deploy/<id>/etc/upper/ as the
     // overlayfs upperdir for /etc. Files placed there are visible in the

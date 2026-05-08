@@ -54,7 +54,7 @@ pub fn run(reboot: bool) -> Result<()> {
         &image_ref,
     ])?;
 
-    patch_bls_entry(&digest, &image_ref)?;
+    patch_bls_entry(Path::new(BOOT_DIR), &digest, &image_ref)?;
 
     // Wire the new deployment's var to the shared /sysroot/state/var so
     // /var content survives upgrades.
@@ -81,8 +81,8 @@ pub fn run(reboot: bool) -> Result<()> {
 
 /// Rewrite the title and version lines in the BLS entry so the GRUB menu
 /// shows something useful instead of the hardcoded "todoOS / 0-todo" from cfsctl.
-fn patch_bls_entry(digest: &str, image_ref: &str) -> Result<()> {
-    let entry_path = PathBuf::from(BOOT_DIR)
+pub fn patch_bls_entry(bootdir: &Path, digest: &str, image_ref: &str) -> Result<()> {
+    let entry_path = bootdir
         .join("loader/entries")
         .join(format!("{digest}.conf"));
     if !entry_path.exists() {
