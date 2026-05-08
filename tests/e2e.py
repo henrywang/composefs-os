@@ -44,7 +44,7 @@ def boot(disk_image, ovmf):
         f"qemu-system-x86_64 -enable-kvm -m 2048 "
         f"-drive file={disk_image},if=virtio,snapshot=on "
         f"-drive if=pflash,format=raw,readonly=on,file={ovmf} "
-        f"-serial stdio -nographic -no-reboot"
+        f"-nographic -no-reboot"
     )
     child = pexpect.spawn(cmd, timeout=TIMEOUT_BOOT, encoding="utf-8")
     child.logfile_read = sys.stdout
