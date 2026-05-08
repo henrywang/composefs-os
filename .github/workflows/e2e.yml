@@ -23,7 +23,7 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q \
-            qemu-system-x86 ovmf podman python3-pexpect
+            qemu-system-x86 ovmf podman skopeo python3-pexpect
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -42,10 +42,13 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # Transfer from Docker daemon to podman storage so podman can reference
-      # it as localhost/composefs-os:fedora-43.
+      # Transfer from Docker daemon to podman storage with an explicit name so
+      # podman resolves localhost/composefs-os:fedora-43 from local storage.
       - name: Load base image into podman
-        run: docker save composefs-os:fedora-43 | sudo podman load
+        run: |
+          sudo skopeo copy \
+            docker-daemon:composefs-os:fedora-43 \
+            containers-storage:localhost/composefs-os:fedora-43
 
       - name: Build test image
         run: |
