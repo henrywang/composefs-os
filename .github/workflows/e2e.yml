@@ -45,11 +45,11 @@ jobs:
       # Transfer from Docker daemon to podman storage so podman can reference
       # it as localhost/composefs-os:fedora-43.
       - name: Load base image into podman
-        run: docker save composefs-os:fedora-43 | podman load
+        run: docker save composefs-os:fedora-43 | sudo podman load
 
       - name: Build test image
         run: |
-          podman build \
+          sudo podman build \
             --build-arg BASE_IMAGE=localhost/composefs-os:fedora-43 \
             -t composefs-os-test:latest \
             -f examples/fedora/Containerfile .
