@@ -81,13 +81,19 @@ pub fn run_to_disk(opts: ToDiskOpts) -> Result<()> {
         if opts.secure_boot {
             println!("      -machine q35,smm=on \\");
             println!("      -global driver=cfi.pflash01,property=secure,value=on \\");
-            println!("      -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/ovmf/OVMF_CODE.secboot.fd \\");
+            println!(
+                "      -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/ovmf/OVMF_CODE.secboot.fd \\"
+            );
             println!("      -drive if=pflash,format=raw,file=/tmp/OVMF_VARS.secboot.fd \\");
             println!("      -nographic");
             println!();
-            println!("(copy /usr/share/edk2/ovmf/OVMF_VARS.secboot.fd to /tmp/OVMF_VARS.secboot.fd — QEMU needs a writable VARS file)");
+            println!(
+                "(copy /usr/share/edk2/ovmf/OVMF_VARS.secboot.fd to /tmp/OVMF_VARS.secboot.fd — QEMU needs a writable VARS file)"
+            );
         } else {
-            println!("      -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/ovmf/OVMF_CODE.fd \\");
+            println!(
+                "      -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/ovmf/OVMF_CODE.fd \\"
+            );
             println!("      -nographic");
         }
     }
