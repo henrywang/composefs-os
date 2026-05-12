@@ -26,6 +26,9 @@ pub struct ToDiskOpts {
     /// Run wipefs on the target before partitioning
     #[arg(long)]
     wipe: bool,
+    /// Install pre-signed shim+grub EFI chain instead of grub2-install (required for Secure Boot)
+    #[arg(long)]
+    secure_boot: bool,
 }
 
 pub fn run(command: InstallCommand) -> Result<()> {
@@ -49,7 +52,14 @@ pub fn run_to_disk(opts: ToDiskOpts) -> Result<()> {
     let mnt_path = mnt.path().to_path_buf();
     let mut mounts: Vec<PathBuf> = Vec::new();
 
-    let result = install_inner(&dev, &image_ref, &opts.filesystem, &mnt_path, &mut mounts);
+    let result = install_inner(
+        &dev,
+        &image_ref,
+        &opts.filesystem,
+        opts.secure_boot,
+        &mnt_path,
+        &mut mounts,
+    );
 
     // Always clean up, regardless of result
     for m in mounts.iter().rev() {
@@ -68,10 +78,18 @@ pub fn run_to_disk(opts: ToDiskOpts) -> Result<()> {
         println!("Boot it with:");
         println!("  qemu-system-x86_64 -enable-kvm -m 4096 \\");
         println!("      -drive file={output},if=virtio \\");
-        println!(
-            "      -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/ovmf/OVMF_CODE.fd \\"
-        );
-        println!("      -nographic");
+        if opts.secure_boot {
+            println!("      -machine q35,smm=on \\");
+            println!("      -global driver=cfi.pflash01,property=secure,value=on \\");
+            println!("      -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/ovmf/OVMF_CODE.secboot.fd \\");
+            println!("      -drive if=pflash,format=raw,file=/tmp/OVMF_VARS.secboot.fd \\");
+            println!("      -nographic");
+            println!();
+            println!("(copy /usr/share/edk2/ovmf/OVMF_VARS.secboot.fd to /tmp/OVMF_VARS.secboot.fd — QEMU needs a writable VARS file)");
+        } else {
+            println!("      -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/ovmf/OVMF_CODE.fd \\");
+            println!("      -nographic");
+        }
     }
 
     Ok(())
@@ -121,6 +139,7 @@ fn install_inner(
     dev: &Path,
     image_ref: &str,
     filesystem: &str,
+    secure_boot: bool,
     mnt_path: &Path,
     mounts: &mut Vec<PathBuf>,
 ) -> Result<()> {
@@ -145,10 +164,11 @@ fn install_inner(
     run_cmd("mkfs.ext4", &["-F", "-L", "boot", boot_p.to_str().unwrap()])?;
     match filesystem {
         "xfs" => run_cmd("mkfs.xfs", &["-f", "-L", "root", root_p.to_str().unwrap()])?,
-        _ => run_cmd(
-            "mkfs.ext4",
-            &["-F", "-L", "root", "-O", "verity", root_p.to_str().unwrap()],
-        )?,
+        // Linux 7.0 regression: overlayfs checks trusted.overlay.verity xattrs
+        // unconditionally at switch_root, failing when objects have fs-verity.
+        // Omit -O verity so FS_IOC_ENABLE_VERITY fails silently in insecure
+        // mode, leaving objects without verity and erofs without the xattrs.
+        _ => run_cmd("mkfs.ext4", &["-F", "-L", "root", root_p.to_str().unwrap()])?,
     }
 
     let root_uuid = blkid_uuid(root_p.to_str().unwrap())?;
@@ -185,12 +205,20 @@ fn install_inner(
     println!("==> Initializing composefs repo");
     let cfs_repo = mnt_path.join("composefs");
     fs::create_dir_all(&cfs_repo)?;
-    run_cmd("cfsctl", &["--repo", cfs_repo.to_str().unwrap(), "init"])?;
+    // Linux 7.0 kernel regression (bootc#2174): overlayfs fsverity enforcement
+    // fails at switch_root with "has no fs-verity digest". Pass --insecure as a
+    // global flag so prepare-boot writes composefs=?<hash> (with '?' prefix) in
+    // the BLS entry, causing composefs-setup-root to skip verity=require.
+    run_cmd(
+        "cfsctl",
+        &["--insecure", "--repo", cfs_repo.to_str().unwrap(), "init"],
+    )?;
 
     println!("==> Pulling image: {image_ref}");
     run_cmd(
         "cfsctl",
         &[
+            "--insecure",
             "--repo",
             cfs_repo.to_str().unwrap(),
             "oci",
@@ -203,6 +231,7 @@ fn install_inner(
     let digest = run_cmd_output(
         "cfsctl",
         &[
+            "--insecure",
             "--repo",
             cfs_repo.to_str().unwrap(),
             "oci",
@@ -215,6 +244,7 @@ fn install_inner(
     run_cmd(
         "cfsctl",
         &[
+            "--insecure",
             "--repo",
             cfs_repo.to_str().unwrap(),
             "oci",
@@ -253,22 +283,27 @@ fn install_inner(
     fs::remove_dir(deploy_dir.join("var")).context("removing placeholder var dir")?;
     symlink("../../var", deploy_dir.join("var")).context("creating shared var symlink")?;
 
-    println!("==> Installing GRUB");
-    let grub = grub_install_bin();
-    let efi_dir_arg = format!("--efi-directory={}", efi_mnt.display());
-    let boot_dir_arg = format!("--boot-directory={}", boot_mnt.display());
-    run_cmd(
-        grub,
-        &[
-            "--target=x86_64-efi",
-            efi_dir_arg.as_str(),
-            boot_dir_arg.as_str(),
-            "--bootloader-id=cbootc",
-            "--removable",
-            "--no-nvram",
-            "--force",
-        ],
-    )?;
+    if secure_boot {
+        println!("==> Installing Secure Boot EFI chain (shim → grub)");
+        install_shim_efi(&efi_mnt, &boot_uuid)?;
+    } else {
+        println!("==> Installing GRUB");
+        let grub = grub_install_bin();
+        let efi_dir_arg = format!("--efi-directory={}", efi_mnt.display());
+        let boot_dir_arg = format!("--boot-directory={}", boot_mnt.display());
+        run_cmd(
+            grub,
+            &[
+                "--target=x86_64-efi",
+                efi_dir_arg.as_str(),
+                boot_dir_arg.as_str(),
+                "--bootloader-id=cbootc",
+                "--removable",
+                "--no-nvram",
+                "--force",
+            ],
+        )?;
+    }
 
     println!("==> Writing grub.cfg");
     let grub2_dir = boot_mnt.join("grub2");
@@ -286,7 +321,6 @@ fn install_inner(
          fi\n\
          set timeout=3\n\
          insmod ext2\n\
-         insmod all_video\n\
          function load_video { true; }\n\
          insmod blscfg\n\
          blscfg\n",
@@ -435,6 +469,68 @@ fn sfdisk_gpt(dev: &Path) -> Result<()> {
 
 fn blkid_uuid(dev: &str) -> Result<String> {
     run_cmd_output("blkid", &["-s", "UUID", "-o", "value", dev])
+}
+
+fn install_shim_efi(efi_mnt: &Path, boot_uuid: &str) -> Result<()> {
+    let src = Path::new("/usr/share/efi/EFI/fedora");
+    if !src.exists() {
+        bail!(
+            "Secure Boot EFI binaries not found at {}. \
+             The image must be built from Containerfile.base which preserves shim-x64/grub2-efi-x64 binaries.",
+            src.display()
+        );
+    }
+
+    let boot_dst = efi_mnt.join("EFI/BOOT");
+    fs::create_dir_all(&boot_dst)?;
+
+    fs::copy(src.join("shimx64.efi"), boot_dst.join("BOOTx64.EFI"))
+        .context("copy shimx64.efi → EFI/BOOT/BOOTx64.EFI")?;
+    fs::copy(src.join("grubx64.efi"), boot_dst.join("grubx64.efi"))
+        .context("copy grubx64.efi → EFI/BOOT/grubx64.efi")?;
+    let mm = src.join("mmx64.efi");
+    if mm.exists() {
+        fs::copy(&mm, boot_dst.join("mmx64.efi")).context("copy mmx64.efi")?;
+    }
+
+    // Also populate EFI/fedora/ for NVRAM-based boot entries and as a fallback
+    // for grub binaries that have EFI/fedora/ compiled as their search prefix.
+    let fedora_dst = efi_mnt.join("EFI/fedora");
+    fs::create_dir_all(&fedora_dst)?;
+    fs::copy(src.join("shimx64.efi"), fedora_dst.join("shimx64.efi"))
+        .context("copy shimx64.efi → EFI/fedora/")?;
+    fs::copy(src.join("grubx64.efi"), fedora_dst.join("grubx64.efi"))
+        .context("copy grubx64.efi → EFI/fedora/")?;
+
+    // The Fedora-signed grubx64.efi has /EFI/fedora compiled as its prefix, so
+    // it reads EFI/fedora/grub.cfg from the ESP.  Rather than a stub that calls
+    // configfile across to /boot (which hits Secure Boot lockdown restrictions
+    // and leaves $root pointing at the ESP so blscfg can't find kernel files),
+    // write the full grub config directly on the ESP.  search --set=root
+    // anchors $root to the /boot partition so load_env, grubenv writes, and
+    // blscfg kernel path resolution all work correctly without any indirection.
+    let esp_grub_cfg = format!(
+        "serial --unit=0 --speed=115200\n\
+         terminal_input serial console\n\
+         terminal_output serial console\n\
+         search --no-floppy --fs-uuid --set=root {boot_uuid}\n\
+         set prefix=($root)/grub2\n\
+         load_env\n\
+         if [ \"${{next_entry}}\" ] ; then\n\
+           set default=\"${{next_entry}}\"\n\
+           set next_entry=\n\
+           save_env next_entry\n\
+         fi\n\
+         set timeout=3\n\
+         insmod ext2\n\
+         function load_video {{ true; }}\n\
+         insmod blscfg\n\
+         blscfg\n"
+    );
+    fs::write(boot_dst.join("grub.cfg"), &esp_grub_cfg)?;
+    fs::write(fedora_dst.join("grub.cfg"), &esp_grub_cfg)?;
+
+    Ok(())
 }
 
 fn grub_install_bin() -> &'static str {

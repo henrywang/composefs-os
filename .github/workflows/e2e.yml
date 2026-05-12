@@ -38,22 +38,22 @@ jobs:
           file: Containerfile.base
           push: false
           load: true
-          tags: composefs-os:fedora-43
+          tags: composefs-os:fedora-44
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       # Transfer from Docker daemon to podman storage with an explicit name so
-      # podman resolves localhost/composefs-os:fedora-43 from local storage.
+      # podman resolves localhost/composefs-os:fedora-44 from local storage.
       - name: Load base image into podman
         run: |
           sudo skopeo copy \
-            docker-daemon:composefs-os:fedora-43 \
-            containers-storage:localhost/composefs-os:fedora-43
+            docker-daemon:composefs-os:fedora-44 \
+            containers-storage:localhost/composefs-os:fedora-44
 
       - name: Build test image
         run: |
           sudo podman build \
-            --build-arg BASE_IMAGE=localhost/composefs-os:fedora-43 \
+            --build-arg BASE_IMAGE=localhost/composefs-os:fedora-44 \
             -t composefs-os-test:latest \
             -f examples/fedora/Containerfile .
 
@@ -68,13 +68,28 @@ jobs:
 
       - name: Run e2e tests
         run: |
-          OVMF=$(find /usr/share -name 'OVMF_CODE*.fd' ! -name '*VARS*' | head -1)
+          OVMF=$(find /usr/share -name 'OVMF_CODE*.fd' ! -name '*VARS*' ! -name '*.secboot*' ! -name '*.ms.*' | head -1)
           python3 tests/e2e.py --ovmf "$OVMF" disk.raw
 
-      - name: Upload disk image on failure
+      - name: Install to disk image (Secure Boot)
+        run: |
+          sudo podman run --rm --privileged \
+            -v ${{ github.workspace }}:/output \
+            -v /var/lib/containers:/var/lib/containers \
+            -v /var/tmp:/var/tmp \
+            composefs-os-test:latest \
+            cbootc install to-disk /output/disk-sb.raw --size 5G --secure-boot
+
+      - name: Run e2e tests (Secure Boot)
+        run: |
+          python3 tests/e2e.py --secure-boot disk-sb.raw
+
+      - name: Upload disk images on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: disk-raw
-          path: disk.raw
+          path: |
+            disk.raw
+            disk-sb.raw
           retention-days: 1

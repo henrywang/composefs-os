@@ -27,12 +27,12 @@ jobs:
 
       # Build the base image and push it.  The build is slow (dnf + dracut)
       # so GHA layer cache is critical for subsequent runs.
-      - name: Build and push composefs-os:fedora-43
+      - name: Build and push composefs-os:fedora-44
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Containerfile.base
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/composefs-os:fedora-43
+          tags: ghcr.io/${{ github.repository_owner }}/composefs-os:fedora-44
           cache-from: type=gha
           cache-to: type=gha,mode=max

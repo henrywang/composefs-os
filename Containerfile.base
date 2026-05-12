@@ -1,4 +1,4 @@
-# composefs-os:fedora-43 — Base image for composefs-rs bootable Fedora 43 systems.
+# composefs-os:fedora-44 — Base image for composefs-rs bootable Fedora 44 systems.
 #
 # This image contains the kernel, systemd, grub2, composefs toolchain (cfsctl,
 # composefs-setup-root, dracut module), and cbootc. /etc and /var are left
@@ -8,7 +8,7 @@
 # packages, add LABEL containers.bootc=1, and build. The composefs layout
 # transformation happens at install time via 'cbootc install to-disk'.
 #
-# Build: podman build -t composefs-os:fedora-43 -f Containerfile.base .
+# Build: podman build -t composefs-os:fedora-44 -f Containerfile.base .
 
 # ---------------------------------------------------------------------------
 # Stage 0a: Build cbootc
@@ -30,9 +30,9 @@ RUN cargo build --release -p composefs-ctl && \
     cargo build --release -p composefs-setup-root --no-default-features
 
 # ---------------------------------------------------------------------------
-# Stage 1: Bootstrap Fedora 43 rootfs via dnf --installroot
+# Stage 1: Bootstrap Fedora 44 rootfs via dnf --installroot
 # ---------------------------------------------------------------------------
-FROM quay.io/fedora/fedora:43 AS rootfs-builder
+FROM quay.io/fedora/fedora:44 AS rootfs-builder
 
 # Install dracut on the builder for 'dracut --sysroot /rootfs'
 RUN dnf install -y dracut && dnf clean all
@@ -40,7 +40,7 @@ RUN dnf install -y dracut && dnf clean all
 RUN dnf install -y \
         --installroot /rootfs \
         --use-host-config \
-        --releasever 43 \
+        --releasever 44 \
         --setopt=install_weak_deps=False \
         fedora-repos \
         kernel kernel-modules kernel-modules-core linux-firmware \
@@ -51,6 +51,7 @@ RUN dnf install -y \
         e2fsprogs dosfstools btrfs-progs \
         grub2-efi-x64 grub2-efi-x64-modules grub2-tools grub2-tools-minimal \
         shim-x64 efibootmgr \
+        fsverity-utils \
         dracut \
         podman skopeo \
         vim-minimal less \
@@ -91,7 +92,7 @@ RUN printf '#%%PAM-1.0\nauth required pam_deny.so\n' \
     cp /rootfs/etc/authselect/fingerprint-auth \
        /rootfs/etc/authselect/smartcard-auth
 
-# Allow root login on serial console (Fedora 43 securetty omits ttyS*)
+# Allow root login on serial console (Fedora 44 securetty omits ttyS*)
 RUN echo 'ttyS0' >> /rootfs/etc/securetty
 
 # Disable SELinux — no policy installed in this minimal image
@@ -154,6 +155,8 @@ RUN KVER=$(ls /rootfs/usr/lib/modules | head -1) && \
         cp "/rootfs/boot/vmlinuz-$KVER" \
            "/rootfs/usr/lib/modules/$KVER/vmlinuz"; \
     fi && \
+    mkdir -p /rootfs/usr/share/efi && \
+    cp -r /rootfs/boot/efi/EFI /rootfs/usr/share/efi/ && \
     rm -rf /rootfs/boot/*
 
 # ---------------------------------------------------------------------------
@@ -199,7 +202,7 @@ COPY --from=rootfs-builder /rootfs /
 LABEL containers.bootc=1
 LABEL composefs.backend=cfs-rs
 LABEL org.opencontainers.image.title="Fedora CFS Base"
-LABEL org.opencontainers.image.description="Base image for composefs-rs bootable Fedora 43 systems"
-LABEL org.opencontainers.image.version="43"
+LABEL org.opencontainers.image.description="Base image for composefs-rs bootable Fedora 44 systems"
+LABEL org.opencontainers.image.version="44"
 
 CMD ["/sbin/init"]

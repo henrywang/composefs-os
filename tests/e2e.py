@@ -12,11 +12,15 @@ serial console.  Requires:
 Usage:
   python3 tests/e2e.py disk.raw
   python3 tests/e2e.py --ovmf /path/to/OVMF_CODE.fd disk.raw
+  python3 tests/e2e.py --secure-boot disk-sb.raw
 """
 
 import argparse
+import os
 import re
+import shutil
 import sys
+import tempfile
 import pexpect
 
 PROMPT = r"\[root@[^\]]+\]#"
@@ -30,20 +34,49 @@ OVMF_CANDIDATES = [
     "/usr/share/ovmf/OVMF_CODE.fd",
 ]
 
+OVMF_SECBOOT_CODE_CANDIDATES = [
+    "/usr/share/edk2/ovmf/OVMF_CODE.secboot.fd",   # Fedora
+    "/usr/share/OVMF/OVMF_CODE_4M.ms.fd",           # Ubuntu 24.04
+    "/usr/share/OVMF/OVMF_CODE.secboot.fd",         # Ubuntu older
+]
+
+OVMF_SECBOOT_VARS_CANDIDATES = [
+    "/usr/share/edk2/ovmf/OVMF_VARS.secboot.fd",   # Fedora
+    "/usr/share/OVMF/OVMF_VARS_4M.ms.fd",           # Ubuntu 24.04
+    "/usr/share/OVMF/OVMF_VARS.secboot.fd",         # Ubuntu older
+]
+
 
 def find_ovmf():
-    import os
     for path in OVMF_CANDIDATES:
         if os.path.exists(path):
             return path
     return None
 
 
-def boot(disk_image, ovmf):
+def find_ovmf_secboot():
+    code = next((p for p in OVMF_SECBOOT_CODE_CANDIDATES if os.path.exists(p)), None)
+    vars_ = next((p for p in OVMF_SECBOOT_VARS_CANDIDATES if os.path.exists(p)), None)
+    return code, vars_
+
+
+def boot(disk_image, ovmf_code, ovmf_vars=None):
+    if ovmf_vars:
+        # Secure Boot OVMF requires q35 + SMM for the firmware's variable-locking
+        # code; without smm=on the firmware stalls silently before any serial output.
+        machine = "-machine q35,smm=on -global driver=cfi.pflash01,property=secure,value=on"
+        pflash = (
+            f"-drive if=pflash,format=raw,readonly=on,file={ovmf_code} "
+            f"-drive if=pflash,format=raw,file={ovmf_vars}"
+        )
+    else:
+        machine = ""
+        pflash = f"-drive if=pflash,format=raw,readonly=on,file={ovmf_code}"
     cmd = (
         f"qemu-system-x86_64 -enable-kvm -m 2048 "
+        f"{machine} "
         f"-drive file={disk_image},if=virtio,snapshot=on "
-        f"-drive if=pflash,format=raw,readonly=on,file={ovmf} "
+        f"{pflash} "
         f"-nographic -no-reboot"
     )
     child = pexpect.spawn(cmd, timeout=TIMEOUT_BOOT, encoding="utf-8")
@@ -69,6 +102,18 @@ def run_cmd(child, cmd):
 # ---------------------------------------------------------------------------
 # Individual tests
 # ---------------------------------------------------------------------------
+
+def test_secure_boot_enabled(child):
+    """SecureBoot EFI variable must report enabled (last attribute byte = 1)."""
+    rc, out = run_cmd(
+        child,
+        "od -An -t u1 "
+        "/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c "
+        "2>/dev/null | awk '{print $NF}'"
+    )
+    assert rc == 0, "SecureBoot EFI variable not readable"
+    assert out.strip() == "1", f"Secure Boot not active (last byte = {out.strip()!r})"
+
 
 def test_status(child):
     """cbootc status: Digest populated, Image configured, no error trace."""
@@ -122,43 +167,71 @@ TESTS = [
 def main():
     parser = argparse.ArgumentParser(description="composefs-os e2e tests")
     parser.add_argument("disk_image", help="Path to disk.raw")
-    parser.add_argument("--ovmf", help="Path to OVMF_CODE.fd")
+    parser.add_argument("--ovmf", help="Path to OVMF CODE flash file")
+    parser.add_argument("--ovmf-vars", help="Path to OVMF VARS flash file (Secure Boot mode)")
+    parser.add_argument(
+        "--secure-boot",
+        action="store_true",
+        help="Boot with Secure Boot enforcement (requires OVMF secboot firmware)",
+    )
     args = parser.parse_args()
 
-    ovmf = args.ovmf or find_ovmf()
-    if not ovmf:
-        print("ERROR: OVMF firmware not found. Install edk2-ovmf or pass --ovmf.")
-        sys.exit(1)
-
-    print(f"Booting {args.disk_image} ...")
-    child = boot(args.disk_image, ovmf)
-
+    ovmf_vars_tmp = None
     try:
-        wait_for_shell(child)
-        print("==> Boot OK\n")
+        if args.secure_boot:
+            sb_code, sb_vars = find_ovmf_secboot()
+            ovmf_code = args.ovmf or sb_code
+            ovmf_vars_src = args.ovmf_vars or sb_vars
+            if not ovmf_code or not ovmf_vars_src:
+                print(
+                    "ERROR: Secure Boot OVMF firmware not found. "
+                    "Install edk2-ovmf (Fedora) or ovmf (Ubuntu), "
+                    "or pass --ovmf / --ovmf-vars."
+                )
+                sys.exit(1)
+            fd, ovmf_vars_tmp = tempfile.mkstemp(suffix=".fd")
+            os.close(fd)
+            shutil.copy2(ovmf_vars_src, ovmf_vars_tmp)
+            tests = [test_secure_boot_enabled] + TESTS
+        else:
+            ovmf_code = args.ovmf or find_ovmf()
+            if not ovmf_code:
+                print("ERROR: OVMF firmware not found. Install edk2-ovmf or pass --ovmf.")
+                sys.exit(1)
+            tests = TESTS
 
-        passed = failed = 0
-        for test_fn in TESTS:
-            name = test_fn.__name__
-            try:
-                test_fn(child)
-                print(f"  PASS  {name}")
-                passed += 1
-            except AssertionError as e:
-                print(f"  FAIL  {name}: {e}")
-                failed += 1
+        print(f"Booting {args.disk_image} ...")
+        child = boot(args.disk_image, ovmf_code, ovmf_vars_tmp)
 
-        print(f"\n{passed} passed, {failed} failed")
-        sys.exit(0 if failed == 0 else 1)
+        try:
+            wait_for_shell(child)
+            print("==> Boot OK\n")
 
-    except pexpect.TIMEOUT:
-        print("\nFAIL: timed out waiting for output")
-        print("Last output:")
-        print(child.before)
-        sys.exit(1)
+            passed = failed = 0
+            for test_fn in tests:
+                name = test_fn.__name__
+                try:
+                    test_fn(child)
+                    print(f"  PASS  {name}")
+                    passed += 1
+                except AssertionError as e:
+                    print(f"  FAIL  {name}: {e}")
+                    failed += 1
+
+            print(f"\n{passed} passed, {failed} failed")
+            sys.exit(0 if failed == 0 else 1)
+
+        except pexpect.TIMEOUT:
+            print("\nFAIL: timed out waiting for output")
+            print("Last output:")
+            print(child.before)
+            sys.exit(1)
+        finally:
+            child.sendline("poweroff -f")
+            child.expect(pexpect.EOF, timeout=30)
     finally:
-        child.sendline("poweroff -f")
-        child.expect(pexpect.EOF, timeout=30)
+        if ovmf_vars_tmp and os.path.exists(ovmf_vars_tmp):
+            os.unlink(ovmf_vars_tmp)
 
 
 if __name__ == "__main__":
