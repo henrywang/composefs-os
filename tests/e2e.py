@@ -109,7 +109,7 @@ def test_secure_boot_enabled(child):
         child,
         "od -An -t u1 "
         "/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c "
-        "2>/dev/null | awk '{print $NF}'"
+        "2>/dev/null | tr -s ' ' '\\n' | tail -1"
     )
     assert rc == 0, "SecureBoot EFI variable not readable"
     assert out.strip() == "1", f"Secure Boot not active (last byte = {out.strip()!r})"
