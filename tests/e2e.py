@@ -112,7 +112,8 @@ def test_secure_boot_enabled(child):
         "2>/dev/null | tr -s ' ' '\\n' | tail -1"
     )
     assert rc == 0, "SecureBoot EFI variable not readable"
-    assert out.strip() == "1", f"Secure Boot not active (last byte = {out.strip()!r})"
+    m = re.search(r"(\d+)\s*$", out)
+    assert m and m.group(1) == "1", f"Secure Boot not active: {out.strip()!r}"
 
 
 def test_status(child):
