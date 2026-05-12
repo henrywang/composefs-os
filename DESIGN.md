@@ -117,9 +117,20 @@ corrupt.
 
 `cbootc install to-disk <DEVICE>` runs inside the container image and writes a
 bootable system to a block device or raw file. It handles partitioning (GPT,
-via sfdisk), formatting, composefs repo initialisation, GRUB installation, and
+via sfdisk), formatting, composefs repo initialisation, EFI setup, and
 shared-var wiring. Running inside the container means the source image is always
 the container itself — no separate image reference needed at install time.
+
+Two EFI boot modes are supported via `--secure-boot`:
+
+- **Default:** runs `grub2-install --target=x86_64-efi` to generate a GRUB EFI
+  binary. Works on any EFI system; rejected by firmware with Secure Boot enabled.
+- **`--secure-boot`:** copies the pre-signed shim (`shimx64.efi`) and Fedora-signed
+  GRUB (`grubx64.efi`) from `/usr/share/efi/` (preserved in the base image at
+  build time) to the ESP. The full GRUB config is written directly to the ESP so
+  GRUB can resolve BLS entries without crossing partition boundaries under Secure
+  Boot lockdown. No custom key enrollment required — the Microsoft-signed shim
+  trusts the Fedora-signed GRUB out of the box.
 
 ## Command Surface
 

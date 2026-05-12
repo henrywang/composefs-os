@@ -21,7 +21,7 @@ See [DESIGN.md](DESIGN.md) for rationale and architecture.
 
 | Image | Status |
 |-------|--------|
-| `ghcr.io/henrywang/composefs-os:fedora-43` | Working |
+| `ghcr.io/henrywang/composefs-os:fedora-44` | Working |
 | Ubuntu | Planned |
 | Arch Linux | Planned |
 
@@ -34,7 +34,7 @@ sudo podman run --rm --privileged \
     -v $(pwd):/output \
     -v /var/lib/containers:/var/lib/containers \
     -v /var/tmp:/var/tmp \
-    ghcr.io/henrywang/composefs-os:fedora-43 \
+    ghcr.io/henrywang/composefs-os:fedora-44 \
     cbootc install to-disk /output/disk.raw --size 10G
 
 # Boot it
@@ -44,13 +44,42 @@ qemu-system-x86_64 -enable-kvm -m 4096 \
     -nographic
 ```
 
+### Secure Boot
+
+Pass `--secure-boot` to install the pre-signed Fedora shim + GRUB chain instead
+of running `grub2-install`. The resulting image passes UEFI Secure Boot
+enforcement without enrolling any custom keys.
+
+```sh
+# Install with Secure Boot EFI chain
+sudo podman run --rm --privileged \
+    -v $(pwd):/output \
+    -v /var/lib/containers:/var/lib/containers \
+    -v /var/tmp:/var/tmp \
+    ghcr.io/henrywang/composefs-os:fedora-44 \
+    cbootc install to-disk /output/disk-sb.raw --size 10G --secure-boot
+
+# Boot with OVMF Secure Boot firmware (VARS must be a writable copy)
+cp /usr/share/edk2/ovmf/OVMF_VARS.secboot.fd /tmp/OVMF_VARS.secboot.fd
+qemu-system-x86_64 -enable-kvm -m 4096 \
+    -machine q35,smm=on \
+    -global driver=cfi.pflash01,property=secure,value=on \
+    -drive file=disk-sb.raw,if=virtio \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/ovmf/OVMF_CODE.secboot.fd \
+    -drive if=pflash,format=raw,file=/tmp/OVMF_VARS.secboot.fd \
+    -nographic
+```
+
+The same base image works for both modes — the EFI chain difference is handled
+entirely at install time.
+
 ## Building a Custom Image
 
 The published base images are a starting point. Add your own packages and
 configuration in a derived `Containerfile`:
 
 ```dockerfile
-FROM ghcr.io/henrywang/composefs-os:fedora-43
+FROM ghcr.io/henrywang/composefs-os:fedora-44
 
 # Add packages
 RUN dnf install -y vim htop && dnf clean all
@@ -80,7 +109,7 @@ cbootc rollback
 systemctl reboot
 
 # Switch to a different image
-cbootc switch docker://ghcr.io/henrywang/composefs-os:fedora-43
+cbootc switch docker://ghcr.io/henrywang/composefs-os:fedora-44
 ```
 
 The tracked image reference is stored in `/var/lib/cbootc/config.toml` and
@@ -91,7 +120,7 @@ survives upgrades. `cbootc-update.timer` (enabled in the base image) runs
 
 ```
 composefs-os/
-  Containerfile.base         Builds the bootable Fedora 43 base image
+  Containerfile.base         Builds the bootable Fedora 44 base image
   src/                       cbootc source (Rust)
   units/
     cbootc-update.service    Systemd service for automatic upgrades
@@ -144,8 +173,8 @@ are not pruned automatically. Remove them manually when disk space is a concern.
 
 ### x86-64 only
 
-The GRUB install step is hard-coded to `--target=x86_64-efi`.
-aarch64 and other architectures are not supported.
+Both the standard GRUB install and the `--secure-boot` shim chain are
+hard-coded to `x86_64-efi`. aarch64 and other architectures are not supported.
 
 ## License
 
