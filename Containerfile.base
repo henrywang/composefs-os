@@ -1,14 +1,12 @@
-# composefs-os:fedora-44 — Base image for composefs-rs bootable Fedora 44 systems.
+# composefs-os:fedora-44 — Base images for composefs-rs bootable Fedora 44 systems.
 #
-# This image contains the kernel, systemd, grub2, composefs toolchain (cfsctl,
-# composefs-setup-root, dracut module), and cbootc. /etc and /var are left
-# intact so derived images can use dnf normally.
+# Two named targets are available (default: grub):
+#   --target grub  GRUB-based boot (shim → grub2, BLS Type 1)
+#   --target uki   systemd-boot + UKI (BLS Type 2, cmdline embedded at build time)
 #
-# Derived images require no special build steps — just FROM this image, install
-# packages, add LABEL containers.bootc=1, and build. The composefs layout
-# transformation happens at install time via 'cbootc install to-disk'.
-#
-# Build: podman build -t composefs-os:fedora-44 -f Containerfile.base .
+# Build:
+#   podman build -t composefs-os:fedora-44       -f Containerfile.base .          # GRUB
+#   podman build -t composefs-os:fedora-44-uki   --target uki -f Containerfile.base .
 
 # ---------------------------------------------------------------------------
 # Stage 0a: Build cbootc
@@ -30,9 +28,9 @@ RUN cargo build --release -p composefs-ctl && \
     cargo build --release -p composefs-setup-root --no-default-features
 
 # ---------------------------------------------------------------------------
-# Stage 1: Bootstrap Fedora 44 rootfs via dnf --installroot
+# Stage 1: Bootstrap Fedora 44 rootfs (common to both boot styles)
 # ---------------------------------------------------------------------------
-FROM quay.io/fedora/fedora:44 AS rootfs-builder
+FROM quay.io/fedora/fedora:44 AS rootfs-common
 
 # Install dracut on the builder for 'dracut --sysroot /rootfs'
 RUN dnf install -y dracut && dnf clean all
@@ -49,8 +47,6 @@ RUN dnf install -y \
         NetworkManager iproute iputils hostname \
         dnf5 rpm \
         e2fsprogs dosfstools btrfs-progs \
-        grub2-efi-x64 grub2-efi-x64-modules grub2-tools grub2-tools-minimal \
-        shim-x64 efibootmgr \
         fsverity-utils \
         dracut \
         podman skopeo \
@@ -154,10 +150,7 @@ RUN KVER=$(ls /rootfs/usr/lib/modules | head -1) && \
        [ ! -f "/rootfs/usr/lib/modules/$KVER/vmlinuz" ]; then \
         cp "/rootfs/boot/vmlinuz-$KVER" \
            "/rootfs/usr/lib/modules/$KVER/vmlinuz"; \
-    fi && \
-    mkdir -p /rootfs/usr/share/efi && \
-    cp -r /rootfs/boot/efi/EFI /rootfs/usr/share/efi/ && \
-    rm -rf /rootfs/boot/*
+    fi
 
 # ---------------------------------------------------------------------------
 # Install cfsctl, cbootc, and update units
@@ -192,17 +185,64 @@ RUN mkdir -p /rootfs/sysroot && \
     ln -sf var/srv  /rootfs/srv
 
 # ---------------------------------------------------------------------------
-# Final stage — /etc and /var intact so derived images can use dnf normally.
-# No cfs-layout-apply step is required in derived images; cbootc install
-# to-disk handles the composefs layout transformation at install time.
+# Stage 2a: GRUB — add bootloader packages, copy EFI binaries, clear /boot
 # ---------------------------------------------------------------------------
-FROM scratch
-COPY --from=rootfs-builder /rootfs /
+FROM rootfs-common AS rootfs-grub
+RUN dnf install -y \
+        --installroot /rootfs \
+        --use-host-config \
+        --releasever 44 \
+        --setopt=install_weak_deps=False \
+        grub2-efi-x64 grub2-efi-x64-modules grub2-tools grub2-tools-minimal \
+        shim-x64 efibootmgr \
+    && dnf clean all --installroot /rootfs --use-host-config
+RUN mkdir -p /rootfs/usr/share/efi && \
+    cp -r /rootfs/boot/efi/EFI /rootfs/usr/share/efi/ && \
+    rm -rf /rootfs/boot/*
+
+# ---------------------------------------------------------------------------
+# Stage 2b: systemd-boot — add systemd-boot-unsigned, clear /boot
+# Boot entries (BLS Type 1) are written by cfsctl oci prepare-boot at
+# install time, same as the GRUB path.  No UKI pre-build is needed here:
+# a pre-built UKI would embed a build-time composefs hash, but prepare-boot
+# computes the hash from the OCI image (different code path, different hash).
+# ---------------------------------------------------------------------------
+FROM rootfs-common AS rootfs-uki
+RUN dnf install -y \
+        --installroot /rootfs \
+        --use-host-config \
+        --releasever 44 \
+        --setopt=install_weak_deps=False \
+        systemd-boot-unsigned \
+        systemd-ukify \
+    && dnf clean all --installroot /rootfs --use-host-config
+RUN rm -rf /rootfs/boot/*
+
+# ---------------------------------------------------------------------------
+# Final stage: GRUB (default target, backward-compat)
+# ---------------------------------------------------------------------------
+FROM scratch AS grub
+COPY --from=rootfs-grub /rootfs /
 
 LABEL containers.bootc=1
 LABEL composefs.backend=cfs-rs
 LABEL org.opencontainers.image.title="Fedora CFS Base"
-LABEL org.opencontainers.image.description="Base image for composefs-rs bootable Fedora 44 systems"
+LABEL org.opencontainers.image.description="Base image for composefs-rs bootable Fedora 44 systems (GRUB)"
+LABEL org.opencontainers.image.version="44"
+
+CMD ["/sbin/init"]
+
+# ---------------------------------------------------------------------------
+# Final stage: UKI (--target uki)
+# ---------------------------------------------------------------------------
+FROM scratch AS uki
+COPY --from=rootfs-uki /rootfs /
+
+LABEL containers.bootc=1
+LABEL composefs.backend=cfs-rs
+LABEL cbootc.boot-style=uki
+LABEL org.opencontainers.image.title="Fedora CFS Base (UKI)"
+LABEL org.opencontainers.image.description="Base image for composefs-rs bootable Fedora 44 systems (systemd-boot + UKI)"
 LABEL org.opencontainers.image.version="44"
 
 CMD ["/sbin/init"]

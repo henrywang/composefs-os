@@ -5,6 +5,10 @@ use std::{fs, os::unix::fs::symlink, path::Path, path::PathBuf, process::Command
 
 use crate::{cfsctl, config, signing};
 
+const EFI_ESP: &str = "/boot/efi";
+// UKIs live on the ESP, not XBOOTLDR — systemd-boot always scans its own partition.
+const EFI_LINUX_DIR: &str = "/boot/efi/EFI/Linux";
+
 const BOOT_DIR: &str = "/boot";
 const STATE_PATH: &str = "/var/lib/cbootc/state.json";
 
@@ -53,8 +57,12 @@ pub fn run(reboot: bool) -> Result<()> {
         &cmdline,
         &image_ref,
     ])?;
-
-    patch_bls_entry(Path::new(BOOT_DIR), &digest, &image_ref)?;
+    if Path::new(EFI_LINUX_DIR).exists() {
+        println!("Building UKI ...");
+        build_uki(Path::new(BOOT_DIR), Path::new(EFI_ESP), &digest)?;
+    } else {
+        patch_bls_entry(Path::new(BOOT_DIR), &digest, &image_ref)?;
+    }
 
     // Wire the new deployment's var to the shared /sysroot/state/var so
     // /var content survives upgrades.
@@ -77,6 +85,54 @@ pub fn run(reboot: bool) -> Result<()> {
         println!("Run 'systemctl reboot' to apply, or pass --reboot.");
         Ok(())
     }
+}
+
+/// Convert a Type 1 BLS entry (written by `prepare-boot` on the XBOOTLDR/`bootdir`)
+/// into a UKI .efi on the ESP (`esp`), where systemd-boot always scans.
+/// Reads the full `options` line — including the `composefs=?<hash>` token that
+/// `prepare-boot` prepended — embeds it in the UKI cmdline, then removes the
+/// now-redundant Type 1 .conf and extracted kernel/initramfs directory.
+pub fn build_uki(bootdir: &Path, esp: &Path, digest: &str) -> Result<()> {
+    let conf_path = bootdir
+        .join("loader/entries")
+        .join(format!("{digest}.conf"));
+    let conf = fs::read_to_string(&conf_path)
+        .with_context(|| format!("reading BLS entry {}", conf_path.display()))?;
+
+    let cmdline = conf
+        .lines()
+        .find(|l| l.starts_with("options "))
+        .map(|l| l["options ".len()..].trim())
+        .context("no 'options' line in BLS entry written by prepare-boot")?;
+
+    let vmlinuz = bootdir.join(digest).join("vmlinuz");
+    let initramfs = bootdir.join(digest).join("initramfs.img");
+    let efi_linux = esp.join("EFI/Linux");
+    fs::create_dir_all(&efi_linux).context("creating EFI/Linux on ESP")?;
+    let output = efi_linux.join(format!("{digest}.efi"));
+
+    let status = Command::new("ukify")
+        .args([
+            "build",
+            &format!("--linux={}", vmlinuz.display()),
+            &format!("--initrd={}", initramfs.display()),
+            &format!("--cmdline={cmdline}"),
+            &format!("--output={}", output.display()),
+        ])
+        .status()
+        .context("spawning ukify")?;
+    if !status.success() {
+        anyhow::bail!("ukify failed: {status}");
+    }
+
+    // Type 1 artifacts are now redundant — the UKI is self-contained.
+    let _ = fs::remove_file(&conf_path);
+    let t1_dir = bootdir.join(digest);
+    if t1_dir.exists() {
+        fs::remove_dir_all(&t1_dir).context("removing Type 1 kernel directory")?;
+    }
+
+    Ok(())
 }
 
 /// Rewrite the title and version lines in the BLS entry so the GRUB menu
@@ -136,7 +192,8 @@ fn current_cmdline() -> Result<String> {
 fn current_composefs_digest() -> Option<String> {
     let raw = fs::read_to_string("/proc/cmdline").ok()?;
     raw.split_whitespace()
-        .find_map(|tok| tok.strip_prefix("composefs=").map(str::to_owned))
+        .find_map(|tok| tok.strip_prefix("composefs="))
+        .map(|v| v.trim_start_matches('?').to_owned())
 }
 
 /// Carry /etc changes from the current deployment's overlayfs upper directory

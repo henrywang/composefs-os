@@ -145,6 +145,20 @@ def test_grubenv_exists(child):
     assert rc == 0, "/boot/grub2/grubenv not found"
 
 
+def test_uki_efi_linux(child):
+    """/boot/efi/EFI/Linux must contain exactly one .efi UKI after install."""
+    rc, out = run_cmd(child, "ls /boot/efi/EFI/Linux/*.efi 2>/dev/null | wc -l")
+    assert rc == 0, "failed to list /boot/efi/EFI/Linux"
+    count = out.strip().split()[-1] if out.strip() else "0"
+    assert count == "1", f"expected 1 UKI .efi, found {count}"
+
+
+def test_no_grubenv(child):
+    """/boot/grub2/grubenv must NOT exist on a systemd-boot system."""
+    rc, _ = run_cmd(child, "test -f /boot/grub2/grubenv")
+    assert rc != 0, "/boot/grub2/grubenv should not exist in UKI mode"
+
+
 def test_var_config(child):
     """/var/lib/cbootc/config.toml must exist and contain the image ref."""
     rc, out = run_cmd(child, "cat /var/lib/cbootc/config.toml")
@@ -156,11 +170,19 @@ def test_var_config(child):
 # Runner
 # ---------------------------------------------------------------------------
 
-TESTS = [
+GRUB_TESTS = [
     test_status,
     test_bls_title,
     test_rollback_no_previous,
     test_grubenv_exists,
+    test_var_config,
+]
+
+UKI_TESTS = [
+    test_status,
+    test_uki_efi_linux,
+    test_rollback_no_previous,
+    test_no_grubenv,
     test_var_config,
 ]
 
@@ -174,6 +196,11 @@ def main():
         "--secure-boot",
         action="store_true",
         help="Boot with Secure Boot enforcement (requires OVMF secboot firmware)",
+    )
+    parser.add_argument(
+        "--uki",
+        action="store_true",
+        help="Test a UKI/systemd-boot disk image instead of a GRUB image",
     )
     args = parser.parse_args()
 
@@ -193,13 +220,23 @@ def main():
             fd, ovmf_vars_tmp = tempfile.mkstemp(suffix=".fd")
             os.close(fd)
             shutil.copy2(ovmf_vars_src, ovmf_vars_tmp)
-            tests = [test_secure_boot_enabled] + TESTS
+            tests = [test_secure_boot_enabled] + GRUB_TESTS
+        elif args.uki:
+            ovmf_code = args.ovmf or find_ovmf()
+            if not ovmf_code:
+                print("ERROR: OVMF firmware not found. Install edk2-ovmf or pass --ovmf.")
+                sys.exit(1)
+            if args.ovmf_vars:
+                fd, ovmf_vars_tmp = tempfile.mkstemp(suffix=".fd")
+                os.close(fd)
+                shutil.copy2(args.ovmf_vars, ovmf_vars_tmp)
+            tests = UKI_TESTS
         else:
             ovmf_code = args.ovmf or find_ovmf()
             if not ovmf_code:
                 print("ERROR: OVMF firmware not found. Install edk2-ovmf or pass --ovmf.")
                 sys.exit(1)
-            tests = TESTS
+            tests = GRUB_TESTS
 
         print(f"Booting {args.disk_image} ...")
         child = boot(args.disk_image, ovmf_code, ovmf_vars_tmp)

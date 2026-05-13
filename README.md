@@ -19,11 +19,12 @@ See [DESIGN.md](DESIGN.md) for rationale and architecture.
 
 ## Available Images
 
-| Image | Status |
-|-------|--------|
-| `ghcr.io/henrywang/composefs-os:fedora-44` | Working |
-| Ubuntu | Planned |
-| Arch Linux | Planned |
+| Image | Boot style | Status |
+|-------|-----------|--------|
+| `ghcr.io/henrywang/composefs-os:fedora-44` | GRUB (BLS Type 1) | Working |
+| `ghcr.io/henrywang/composefs-os:fedora-44-uki` | systemd-boot + UKI (BLS Type 2) | Working |
+| Ubuntu | — | Planned |
+| Arch Linux | — | Planned |
 
 
 ## Quick Start
@@ -70,8 +71,37 @@ qemu-system-x86_64 -enable-kvm -m 4096 \
     -nographic
 ```
 
-The same base image works for both modes — the EFI chain difference is handled
-entirely at install time.
+The same GRUB base image works for both modes — the EFI chain difference is
+handled entirely at install time.
+
+### UKI (Unified Kernel Image)
+
+The `-uki` image uses systemd-boot and BLS Type 2 entries: a single `.efi` file
+bundles the kernel, initramfs, and `composefs=` cmdline. The cmdline (including
+the composefs hash) is embedded at **install time** by `cbootc install to-disk`,
+so there is no separate `.conf` file and no writable grubenv.
+
+Pass `--uki` to `cbootc install to-disk` when using the UKI image:
+
+```sh
+sudo podman run --rm --privileged \
+    -v $(pwd):/output \
+    -v /var/lib/containers:/var/lib/containers \
+    -v /var/tmp:/var/tmp \
+    ghcr.io/henrywang/composefs-os:fedora-44-uki \
+    cbootc install to-disk /output/disk-uki.raw --size 10G --uki
+
+# A writable VARS file is needed for EFI variables (random seed, bootctl set-next)
+cp /usr/share/edk2/ovmf/OVMF_VARS.fd /tmp/OVMF_VARS.fd
+qemu-system-x86_64 -enable-kvm -m 4096 \
+    -drive file=disk-uki.raw,if=virtio \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/ovmf/OVMF_CODE.fd \
+    -drive if=pflash,format=raw,file=/tmp/OVMF_VARS.fd \
+    -nographic
+```
+
+`cbootc rollback` automatically detects the boot style — it uses
+`bootctl set-next` on UKI systems and `grub2-editenv` on GRUB systems.
 
 ## Building a Custom Image
 
@@ -120,7 +150,7 @@ survives upgrades. `cbootc-update.timer` (enabled in the base image) runs
 
 ```
 composefs-os/
-  Containerfile.base         Builds the bootable Fedora 44 base image
+  Containerfile.base         Builds Fedora 44 base images (--target grub | uki)
   src/                       cbootc source (Rust)
   units/
     cbootc-update.service    Systemd service for automatic upgrades
@@ -162,14 +192,18 @@ the running system.
 
 ### Rollback
 
-`cbootc rollback` selects the previous deployment for the next boot by writing
-`next_entry` to `/boot/grub2/grubenv`. Run `systemctl reboot` to apply it.
+`cbootc rollback` selects the previous deployment for the next boot.
+Run `systemctl reboot` to apply it.
 
-If rollback itself fails to boot, use the GRUB menu to select the older BLS
-entry manually — each deployment keeps its own entry in `/boot/loader/entries/`.
+- **GRUB systems**: writes `next_entry` to `/boot/grub2/grubenv`. If rollback
+  fails to boot, use the GRUB menu to pick the older BLS entry manually from
+  `/boot/loader/entries/`.
+- **UKI/systemd-boot systems**: calls `bootctl set-next` to set the
+  `LoaderEntryOneShot` EFI variable. If rollback fails to boot, use the
+  systemd-boot menu (hold Space at startup) to pick the older `.efi` entry.
 
-Old deployment boot files (`/boot/<digest>/`) accumulate across upgrades and
-are not pruned automatically. Remove them manually when disk space is a concern.
+Old deployment boot files accumulate across upgrades and are not pruned
+automatically. Remove them manually when disk space is a concern.
 
 ### x86-64 only
 

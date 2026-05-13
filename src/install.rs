@@ -29,6 +29,9 @@ pub struct ToDiskOpts {
     /// Install pre-signed shim+grub EFI chain instead of grub2-install (required for Secure Boot)
     #[arg(long)]
     secure_boot: bool,
+    /// Use systemd-boot + UKI (Unified Kernel Image): FAT32 XBOOTLDR, no grubenv
+    #[arg(long)]
+    uki: bool,
 }
 
 pub fn run(command: InstallCommand) -> Result<()> {
@@ -57,6 +60,7 @@ pub fn run_to_disk(opts: ToDiskOpts) -> Result<()> {
         &image_ref,
         &opts.filesystem,
         opts.secure_boot,
+        opts.uki,
         &mnt_path,
         &mut mounts,
     );
@@ -78,7 +82,7 @@ pub fn run_to_disk(opts: ToDiskOpts) -> Result<()> {
         println!("Boot it with:");
         println!("  qemu-system-x86_64 -enable-kvm -m 4096 \\");
         println!("      -drive file={output},if=virtio \\");
-        if opts.secure_boot {
+        if opts.secure_boot && !opts.uki {
             println!("      -machine q35,smm=on \\");
             println!("      -global driver=cfi.pflash01,property=secure,value=on \\");
             println!(
@@ -146,6 +150,7 @@ fn install_inner(
     image_ref: &str,
     filesystem: &str,
     secure_boot: bool,
+    uki: bool,
     mnt_path: &Path,
     mounts: &mut Vec<PathBuf>,
 ) -> Result<()> {
@@ -167,7 +172,15 @@ fn install_inner(
 
     println!("==> Formatting filesystems");
     run_cmd("mkfs.fat", &["-F32", "-n", "EFI", efi_p.to_str().unwrap()])?;
-    run_cmd("mkfs.ext4", &["-F", "-L", "boot", boot_p.to_str().unwrap()])?;
+    // UKI: XBOOTLDR must be FAT so systemd-boot (a UEFI app) can read EFI/Linux/
+    if uki {
+        run_cmd(
+            "mkfs.fat",
+            &["-F32", "-n", "BOOT", boot_p.to_str().unwrap()],
+        )?;
+    } else {
+        run_cmd("mkfs.ext4", &["-F", "-L", "boot", boot_p.to_str().unwrap()])?;
+    }
     match filesystem {
         "xfs" => run_cmd("mkfs.xfs", &["-f", "-L", "root", root_p.to_str().unwrap()])?,
         // Linux 7.0 regression: overlayfs checks trusted.overlay.verity xattrs
@@ -246,7 +259,13 @@ fn install_inner(
             image_ref,
         ],
     )?;
-    let cmdline = format!("root=UUID={root_uuid} rootfstype={filesystem} rw console=ttyS0,115200");
+    // prepare-boot prepends composefs=?<hash> to whatever --cmdline we supply.
+    // UKI uses root=LABEL=root (stable label); GRUB uses root=UUID=... (stable uuid).
+    let cmdline = if uki {
+        format!("root=LABEL=root rootfstype={filesystem} rw console=ttyS0,115200")
+    } else {
+        format!("root=UUID={root_uuid} rootfstype={filesystem} rw console=ttyS0,115200")
+    };
     run_cmd(
         "cfsctl",
         &[
@@ -264,7 +283,12 @@ fn install_inner(
             image_ref,
         ],
     )?;
-    crate::upgrade::patch_bls_entry(&boot_mnt, &digest, image_ref)?;
+    if uki {
+        println!("==> Building UKI");
+        crate::upgrade::build_uki(&boot_mnt, &efi_mnt, &digest)?;
+    } else {
+        crate::upgrade::patch_bls_entry(&boot_mnt, &digest, image_ref)?;
+    }
 
     // cfsctl oci prepare-boot creates state/deploy/<id>/etc/upper/ as the
     // overlayfs upperdir for /etc. Files placed there are visible in the
@@ -277,11 +301,19 @@ fn install_inner(
     println!("==> Writing fstab");
     fs::write(
         etc_upper.join("fstab"),
-        format!(
-            "UUID={root_uuid}  /          {filesystem}  ro        0 1\n\
-             UUID={boot_uuid}  /boot      ext4          defaults  0 2\n\
-             UUID={efi_uuid}   /boot/efi  vfat          umask=0077,shortname=winnt  0 2\n"
-        ),
+        if uki {
+            format!(
+                "UUID={root_uuid}  /          {filesystem}  ro        0 1\n\
+                 UUID={boot_uuid}  /boot      vfat  umask=0077,shortname=winnt  0 2\n\
+                 UUID={efi_uuid}   /boot/efi  vfat  umask=0077,shortname=winnt  0 2\n"
+            )
+        } else {
+            format!(
+                "UUID={root_uuid}  /          {filesystem}  ro        0 1\n\
+                 UUID={boot_uuid}  /boot      ext4          defaults  0 2\n\
+                 UUID={efi_uuid}   /boot/efi  vfat          umask=0077,shortname=winnt  0 2\n"
+            )
+        },
     )?;
 
     // Replace the per-deployment var with a symlink to a shared state/var so
@@ -289,7 +321,10 @@ fn install_inner(
     fs::remove_dir(deploy_dir.join("var")).context("removing placeholder var dir")?;
     symlink("../../var", deploy_dir.join("var")).context("creating shared var symlink")?;
 
-    if secure_boot {
+    if uki {
+        println!("==> Installing systemd-boot");
+        install_systemd_boot(&efi_mnt)?;
+    } else if secure_boot {
         println!("==> Installing Secure Boot EFI chain (shim → grub)");
         install_shim_efi(&efi_mnt, &boot_uuid)?;
     } else {
@@ -311,30 +346,32 @@ fn install_inner(
         )?;
     }
 
-    println!("==> Writing grub.cfg");
-    let grub2_dir = boot_mnt.join("grub2");
-    fs::create_dir_all(&grub2_dir)?;
-    fs::write(
-        grub2_dir.join("grub.cfg"),
-        "serial --unit=0 --speed=115200\n\
-         terminal_input serial console\n\
-         terminal_output serial console\n\
-         load_env\n\
-         if [ \"${next_entry}\" ] ; then\n\
-           set default=\"${next_entry}\"\n\
-           set next_entry=\n\
-           save_env next_entry\n\
-         fi\n\
-         set timeout=3\n\
-         insmod ext2\n\
-         function load_video { true; }\n\
-         insmod blscfg\n\
-         blscfg\n",
-    )?;
+    if !uki {
+        println!("==> Writing grub.cfg");
+        let grub2_dir = boot_mnt.join("grub2");
+        fs::create_dir_all(&grub2_dir)?;
+        fs::write(
+            grub2_dir.join("grub.cfg"),
+            "serial --unit=0 --speed=115200\n\
+             terminal_input serial console\n\
+             terminal_output serial console\n\
+             load_env\n\
+             if [ \"${next_entry}\" ] ; then\n\
+               set default=\"${next_entry}\"\n\
+               set next_entry=\n\
+               save_env next_entry\n\
+             fi\n\
+             set timeout=3\n\
+             insmod ext2\n\
+             function load_video { true; }\n\
+             insmod blscfg\n\
+             blscfg\n",
+        )?;
 
-    println!("==> Creating grubenv");
-    let grubenv = grub2_dir.join("grubenv");
-    grub_editenv_create(grubenv.to_str().unwrap())?;
+        println!("==> Creating grubenv");
+        let grubenv = grub2_dir.join("grubenv");
+        grub_editenv_create(grubenv.to_str().unwrap())?;
+    }
 
     println!("==> Populating /var from image");
     let shared_var = mnt_path.join("state/var");
@@ -463,7 +500,7 @@ fn sfdisk_gpt(dev: &Path) -> Result<()> {
     child.stdin.as_mut().unwrap().write_all(
         b"label: gpt\n\
           - : size=512MiB, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, name=\"EFI\"\n\
-          - : size=1GiB,   type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name=\"boot\"\n\
+          - : size=1GiB,   type=BC13C2FF-59E6-4262-A352-B275FD6F7172, name=\"boot\"\n\
           - :               type=4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709, name=\"root\"\n",
     )?;
     let status = child.wait()?;
@@ -475,6 +512,34 @@ fn sfdisk_gpt(dev: &Path) -> Result<()> {
 
 fn blkid_uuid(dev: &str) -> Result<String> {
     run_cmd_output("blkid", &["-s", "UUID", "-o", "value", dev])
+}
+
+fn install_systemd_boot(efi_mnt: &Path) -> Result<()> {
+    // systemd-boot-unsigned installs the EFI binary at this fixed path.
+    // Copy it directly instead of running bootctl install, which has version-
+    // dependent flags and requires efivarfs (not available in containers).
+    let src = Path::new("/usr/lib/systemd/boot/efi/systemd-bootx64.efi");
+    if !src.exists() {
+        anyhow::bail!(
+            "systemd-boot EFI binary not found at {}. \
+             The image must be built with --target uki (systemd-boot-unsigned package).",
+            src.display()
+        );
+    }
+
+    let systemd_dir = efi_mnt.join("EFI/systemd");
+    fs::create_dir_all(&systemd_dir)?;
+    fs::copy(src, systemd_dir.join("systemd-bootx64.efi"))
+        .context("copying systemd-boot to EFI/systemd/")?;
+
+    // UEFI fallback: without NVRAM entries (QEMU, VMs, removable media)
+    // firmware looks for EFI/BOOT/BOOTx64.EFI on the ESP.
+    let boot_dir = efi_mnt.join("EFI/BOOT");
+    fs::create_dir_all(&boot_dir)?;
+    fs::copy(src, boot_dir.join("BOOTx64.EFI"))
+        .context("copying systemd-boot to EFI/BOOT/BOOTx64.EFI")?;
+
+    Ok(())
 }
 
 fn install_shim_efi(efi_mnt: &Path, boot_uuid: &str) -> Result<()> {

@@ -19,7 +19,8 @@ fn current_digest() -> Option<String> {
         .ok()?
         .split_whitespace()
         .find(|tok| tok.starts_with("composefs="))
-        .map(|tok| tok["composefs=".len()..].to_owned())
+        // Strip optional '?' insecure-mode prefix so GRUB and UKI comparisons agree
+        .map(|tok| tok["composefs=".len()..].trim_start_matches('?').to_owned())
 }
 
 fn load_entries() -> Result<Vec<BLSEntry>> {
@@ -57,7 +58,7 @@ fn parse_composefs_digest(content: &str) -> Option<String> {
         .find(|l| l.starts_with("options "))?
         .split_whitespace()
         .find(|tok| tok.starts_with("composefs="))
-        .map(|tok| tok["composefs=".len()..].to_owned())
+        .map(|tok| tok["composefs=".len()..].trim_start_matches('?').to_owned())
 }
 
 fn entry_id(path: &Path) -> &str {
@@ -65,6 +66,7 @@ fn entry_id(path: &Path) -> &str {
 }
 
 const GRUBENV: &str = "/boot/grub2/grubenv";
+const EFI_LINUX_DIR: &str = "/boot/efi/EFI/Linux";
 
 fn set_next_entry(id: &str) -> Result<()> {
     let next = format!("next_entry={id}");
@@ -79,26 +81,78 @@ fn set_next_entry(id: &str) -> Result<()> {
     bail!("neither grub2-editenv nor grub-editenv found in PATH")
 }
 
+fn load_uki_entries() -> Result<Vec<BLSEntry>> {
+    let dir = Path::new(EFI_LINUX_DIR);
+    let mut entries = Vec::new();
+
+    for item in fs::read_dir(dir).with_context(|| format!("reading {EFI_LINUX_DIR}"))? {
+        let item = item.with_context(|| format!("iterating {EFI_LINUX_DIR}"))?;
+        let path = item.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("efi") {
+            continue;
+        }
+        let meta = fs::metadata(&path).with_context(|| format!("stat {}", path.display()))?;
+        let mtime = meta
+            .modified()
+            .with_context(|| format!("mtime {}", path.display()))?;
+        // ukify names the .efi after the composefs digest (set via --entry-id)
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_owned();
+        entries.push(BLSEntry {
+            path,
+            composefs_digest: stem,
+            mtime,
+        });
+    }
+
+    Ok(entries)
+}
+
+fn set_next_entry_bootctl(id: &str) -> Result<()> {
+    let status = Command::new("bootctl")
+        .args(["set-next", id])
+        .status()
+        .context("spawning bootctl set-next")?;
+    if !status.success() {
+        bail!("bootctl set-next failed: {status}");
+    }
+    Ok(())
+}
+
+fn use_systemd_boot() -> bool {
+    Path::new(EFI_LINUX_DIR).exists() && !Path::new(GRUBENV).exists()
+}
+
 pub fn run() -> Result<()> {
     let current = current_digest();
+    let systemd_boot = use_systemd_boot();
 
-    let mut entries = load_entries()?;
+    let mut entries = if systemd_boot {
+        load_uki_entries()?
+    } else {
+        load_entries()?
+    };
 
     // Keep only entries that are not the currently booted deployment.
     entries.retain(|e| Some(&e.composefs_digest) != current.as_ref());
 
     if entries.is_empty() {
-        bail!("no previous composefs deployment found in {ENTRIES_DIR}");
+        bail!("no previous composefs deployment found");
     }
 
     // Most-recently written entry = the last prepare-boot ran before this one.
-    // BLS entries are named <digest>.conf (set via --entry-id in cfsctl),
-    // so the file stem matches the GRUB menu entry id that blscfg creates.
     entries.sort_by_key(|e| e.mtime);
     let previous = entries.last().unwrap();
 
     let id = entry_id(&previous.path);
-    set_next_entry(id)?;
+    if systemd_boot {
+        set_next_entry_bootctl(id)?;
+    } else {
+        set_next_entry(id)?;
+    }
 
     println!(
         "Next boot will use deployment {}.",
