@@ -147,10 +147,11 @@ def test_grubenv_exists(child):
 
 def test_uki_efi_linux(child):
     """/boot/efi/EFI/Linux must contain exactly one .efi UKI after install."""
-    rc, out = run_cmd(child, "ls /boot/efi/EFI/Linux/*.efi 2>/dev/null | wc -l")
-    assert rc == 0, "failed to list /boot/efi/EFI/Linux"
-    count = out.strip().split()[-1] if out.strip() else "0"
-    assert count == "1", f"expected 1 UKI .efi, found {count}"
+    rc, _ = run_cmd(
+        child,
+        "test $(ls /boot/efi/EFI/Linux/*.efi 2>/dev/null | wc -l) -eq 1",
+    )
+    assert rc == 0, "expected exactly 1 UKI .efi in /boot/efi/EFI/Linux"
 
 
 def test_no_grubenv(child):
