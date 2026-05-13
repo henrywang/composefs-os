@@ -36,6 +36,7 @@ jobs:
         with:
           context: .
           file: Containerfile.base
+          target: grub
           push: false
           load: true
           tags: composefs-os:fedora-44
