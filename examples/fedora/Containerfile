@@ -30,7 +30,7 @@ RUN mkdir -p /usr/lib/systemd/system/serial-getty@ttyS0.service.d && \
         > /usr/lib/systemd/system/serial-getty@ttyS0.service.d/autologin.conf
 
 # Add your packages here, e.g.:
-# RUN dnf install -y --setopt=install_weak_deps=False vim htop && dnf clean all
+RUN dnf install -y --setopt=install_weak_deps=False vim htop && dnf clean all
 
 # --- Do not edit below this line ------------------------------------------
 

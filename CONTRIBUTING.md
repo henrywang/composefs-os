@@ -3,65 +3,66 @@
 ## Prerequisites
 
 - Rust stable (`rustup toolchain install stable`)
-- For integration tests: `podman`, `qemu-system-x86_64`, OVMF firmware
+- `just` — `sudo apt install just` (Ubuntu 24.04+) or see https://just.systems
+- For container and e2e tests: `podman`, `qemu-system-x86_64`, OVMF firmware (`edk2-ovmf` on Fedora, `ovmf` on Ubuntu)
 
-## Build
-
-```sh
-cargo build --release
-# binary: target/release/cbootc
-```
-
-## Lint
+## Rust
 
 ```sh
-cargo fmt --check
-cargo clippy -- -D warnings
+just build    # compile  →  target/release/cbootc
+just test     # unit tests
+just check    # fmt + clippy, no writes (run this before pushing)
+just fmt      # reformat source
 ```
 
-## Building the example image
+## Building container images
 
 ```sh
-# Base image (slow — runs dnf + dracut inside the container)
-podman build -t composefs-os:fedora-43 -f Containerfile.base .
+# Base images (slow — runs dnf + dracut inside the container)
+just build-base       # GRUB/shim boot
+just build-base-uki   # systemd-boot + UKI
 
-# Derived image (fast — no special steps required)
-podman build -t my-fedora-cfs:latest -f examples/fedora/Containerfile .
+# Example images layered on top (fast)
+just build-example        # GRUB example  →  composefs-os-test:latest
+just build-example-uki    # UKI example   →  composefs-os-uki-test:latest
 ```
 
-Custom images need no `cfs-layout-apply` or `FROM scratch` step. The pattern is:
+Custom images follow the same pattern — no `FROM scratch` or layout step needed:
 
 ```dockerfile
-FROM composefs-os:fedora-43
+FROM composefs-os:fedora-44
 RUN dnf install -y myapp && dnf clean all
 LABEL containers.bootc=1
 CMD ["/sbin/init"]
 ```
 
-## Testing install to-disk
+## Install to disk and run e2e tests
 
-`cbootc install to-disk` must run inside the container image with:
-- `--privileged` — for disk and mknod access
-- `-v /var/lib/containers:/var/lib/containers` — so cfsctl/skopeo can read the image from container storage
-- `-v /dev:/dev` — for physical disk installs; not needed for loopback
+`cbootc install to-disk` runs inside the container with `--privileged` for device access.
+Pass `-v /dev:/dev` for physical disk installs; not needed for the loopback images below.
 
 ```sh
-# Loopback install (creates a raw disk image from inside the container)
-sudo podman run --rm --privileged \
-  -v $(pwd):/output \
-  -v /var/lib/containers:/var/lib/containers \
-  -v /var/tmp:/var/tmp \
-  my-fedora-cfs:latest \
-  cbootc install to-disk /output/disk.raw --size 10G
+# Create disk images (requires sudo)
+just install-disk              # GRUB           →  disk.raw
+just install-disk-secureboot   # Secure Boot    →  disk-sb.raw
+just install-disk-uki          # UKI            →  disk-uki.raw
 
-qemu-system-x86_64 -enable-kvm -m 4096 \
-  -drive file=disk.raw,if=virtio \
-  -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/ovmf/OVMF_CODE.fd \
-  -nographic
+# Run e2e tests against those images
+just e2e                       # GRUB tests
+just e2e-secureboot            # Secure Boot tests
+just e2e-uki                   # UKI tests
+```
+
+Or use the all-in-one recipes that build, install, and test in one shot:
+
+```sh
+just ci-grub        # GRUB end-to-end
+just ci-secureboot  # Secure Boot end-to-end
+just ci-uki         # UKI end-to-end
 ```
 
 ## Pull Requests
 
 - One logical change per PR.
-- `cargo fmt` and `cargo clippy` must pass.
+- `just check` must pass (fmt + clippy).
 - Update `tests/INTEGRATION.md` if behaviour changes.

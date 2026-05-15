@@ -23,7 +23,7 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q \
-            qemu-system-x86 ovmf podman skopeo python3-pexpect
+            just qemu-system-x86 ovmf podman skopeo python3-pexpect
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -52,38 +52,19 @@ jobs:
             containers-storage:localhost/composefs-os:fedora-44
 
       - name: Build test image
-        run: |
-          sudo podman build \
-            --build-arg BASE_IMAGE=localhost/composefs-os:fedora-44 \
-            -t composefs-os-test:latest \
-            -f examples/fedora/Containerfile .
+        run: sudo just build-example localhost/composefs-os:fedora-44
 
       - name: Install to disk image
-        run: |
-          sudo podman run --rm --privileged \
-            -v ${{ github.workspace }}:/output \
-            -v /var/lib/containers:/var/lib/containers \
-            -v /var/tmp:/var/tmp \
-            composefs-os-test:latest \
-            cbootc install to-disk /output/disk.raw --size 5G
+        run: just install-disk composefs-os-test:latest disk.raw 5G
 
       - name: Run e2e tests
-        run: |
-          OVMF=$(find /usr/share -name 'OVMF_CODE*.fd' ! -name '*VARS*' ! -name '*.secboot*' ! -name '*.ms.*' | head -1)
-          python3 tests/e2e.py --ovmf "$OVMF" disk.raw
+        run: just e2e disk.raw
 
       - name: Install to disk image (Secure Boot)
-        run: |
-          sudo podman run --rm --privileged \
-            -v ${{ github.workspace }}:/output \
-            -v /var/lib/containers:/var/lib/containers \
-            -v /var/tmp:/var/tmp \
-            composefs-os-test:latest \
-            cbootc install to-disk /output/disk-sb.raw --size 5G --secure-boot
+        run: just install-disk-secureboot composefs-os-test:latest disk-sb.raw 5G
 
       - name: Run e2e tests (Secure Boot)
-        run: |
-          python3 tests/e2e.py --secure-boot disk-sb.raw
+        run: just e2e-secureboot disk-sb.raw
 
       - name: Build UKI base image
         uses: docker/build-push-action@v6
@@ -104,26 +85,15 @@ jobs:
             containers-storage:localhost/composefs-os:fedora-44-uki
 
       - name: Build UKI test image
-        run: |
-          sudo podman build \
-            --build-arg BASE_IMAGE=localhost/composefs-os:fedora-44-uki \
-            -t composefs-os-uki-test:latest \
-            -f examples/fedora/Containerfile .
+        run: sudo just build-example-uki localhost/composefs-os:fedora-44-uki
 
       - name: Install to disk image (UKI)
-        run: |
-          sudo podman run --rm --privileged \
-            -v ${{ github.workspace }}:/output \
-            -v /var/lib/containers:/var/lib/containers \
-            -v /var/tmp:/var/tmp \
-            composefs-os-uki-test:latest \
-            cbootc install to-disk /output/disk-uki.raw --size 5G --uki
+        run: just install-disk-uki composefs-os-uki-test:latest disk-uki.raw 5G
 
       - name: Run e2e tests (UKI)
         run: |
-          OVMF=$(find /usr/share -name 'OVMF_CODE*.fd' ! -name '*VARS*' ! -name '*.secboot*' ! -name '*.ms.*' | head -1)
           OVMF_VARS=$(find /usr/share -name 'OVMF_VARS.fd' ! -name '*.secboot*' ! -name '*.ms.*' | head -1)
-          python3 tests/e2e.py --ovmf "$OVMF" --ovmf-vars "$OVMF_VARS" --uki disk-uki.raw
+          just e2e-uki disk-uki.raw "$OVMF_VARS"
 
       - name: Upload disk images on failure
         if: failure()
