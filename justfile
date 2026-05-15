@@ -89,7 +89,7 @@ e2e disk="disk.raw":
 # Run e2e tests against a UKI/systemd-boot disk image
 # Pass ovmf_vars to enable Q35/SMM machine type (required by some firmware)
 e2e-uki disk="disk-uki.raw" ovmf_vars="":
-    python3 tests/e2e.py --uki {{if ovmf_vars != "" { "--ovmf-vars " + ovmf_vars } else { "" }}} {{disk}}
+    v="{{ovmf_vars}}"; python3 tests/e2e.py --uki ${v:+--ovmf-vars "$v"} {{disk}}
 
 # Run e2e tests with Secure Boot enforcement
 e2e-secureboot disk="disk-sb.raw":
