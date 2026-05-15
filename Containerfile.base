@@ -219,6 +219,25 @@ RUN dnf install -y \
 RUN rm -rf /rootfs/boot/*
 
 # ---------------------------------------------------------------------------
+# Stage 2c: systemd-boot + Secure Boot — adds sbsigntools and openssl so
+# cbootc can sign systemd-boot and UKIs with a self-generated (or user-
+# provided) key at install time.  No shim: firmware verifies binaries
+# directly against the UEFI Signature Database (db).
+# ---------------------------------------------------------------------------
+FROM rootfs-common AS rootfs-uki-sb
+RUN dnf install -y \
+        --installroot /rootfs \
+        --use-host-config \
+        --releasever 44 \
+        --setopt=install_weak_deps=False \
+        systemd-boot-unsigned \
+        systemd-ukify \
+        sbsigntools \
+        openssl \
+    && dnf clean all --installroot /rootfs --use-host-config
+RUN rm -rf /rootfs/boot/*
+
+# ---------------------------------------------------------------------------
 # Final stage: GRUB (default target, backward-compat)
 # ---------------------------------------------------------------------------
 FROM scratch AS grub
@@ -243,6 +262,21 @@ LABEL composefs.backend=cfs-rs
 LABEL cbootc.boot-style=uki
 LABEL org.opencontainers.image.title="Fedora CFS Base (UKI)"
 LABEL org.opencontainers.image.description="Base image for composefs-rs bootable Fedora 44 systems (systemd-boot + UKI)"
+LABEL org.opencontainers.image.version="44"
+
+CMD ["/sbin/init"]
+
+# ---------------------------------------------------------------------------
+# Final stage: UKI + Secure Boot (--target uki-secureboot)
+# ---------------------------------------------------------------------------
+FROM scratch AS uki-secureboot
+COPY --from=rootfs-uki-sb /rootfs /
+
+LABEL containers.bootc=1
+LABEL composefs.backend=cfs-rs
+LABEL cbootc.boot-style=uki-secureboot
+LABEL org.opencontainers.image.title="Fedora CFS Base (UKI + Secure Boot)"
+LABEL org.opencontainers.image.description="Base image for composefs-rs bootable Fedora 44 systems (systemd-boot + UKI + Secure Boot)"
 LABEL org.opencontainers.image.version="44"
 
 CMD ["/sbin/init"]

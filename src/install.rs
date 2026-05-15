@@ -32,6 +32,12 @@ pub struct ToDiskOpts {
     /// Use systemd-boot + UKI (Unified Kernel Image): FAT32 XBOOTLDR, no grubenv
     #[arg(long)]
     uki: bool,
+    /// PEM private key for signing EFI binaries (--uki --secure-boot); generated if omitted
+    #[arg(long, value_name = "PATH", requires = "sb_cert")]
+    sb_key: Option<PathBuf>,
+    /// PEM certificate for signing EFI binaries (--uki --secure-boot)
+    #[arg(long, value_name = "PATH", requires = "sb_key")]
+    sb_cert: Option<PathBuf>,
 }
 
 pub fn run(command: InstallCommand) -> Result<()> {
@@ -55,12 +61,31 @@ pub fn run_to_disk(opts: ToDiskOpts) -> Result<()> {
     let mnt_path = mnt.path().to_path_buf();
     let mut mounts: Vec<PathBuf> = Vec::new();
 
+    let sb_cert_out = if loop_dev.is_some() && opts.uki && opts.secure_boot {
+        // Derive <disk>.sb.cer next to the disk image so the host can enroll
+        // the cert into OVMF_VARS without mounting the image.
+        let mut p = opts.device.clone();
+        let stem = p
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        p.set_file_name(format!("{stem}.sb.cer"));
+        Some(p)
+    } else {
+        None
+    };
     let result = install_inner(
         &dev,
         &image_ref,
-        &opts.filesystem,
-        opts.secure_boot,
-        opts.uki,
+        &InstallOpts {
+            filesystem: &opts.filesystem,
+            secure_boot: opts.secure_boot,
+            uki: opts.uki,
+            sb_key: opts.sb_key.as_deref(),
+            sb_cert: opts.sb_cert.as_deref(),
+            sb_cert_out,
+        },
         &mnt_path,
         &mut mounts,
     );
@@ -82,7 +107,7 @@ pub fn run_to_disk(opts: ToDiskOpts) -> Result<()> {
         println!("Boot it with:");
         println!("  qemu-system-x86_64 -enable-kvm -m 4096 \\");
         println!("      -drive file={output},if=virtio \\");
-        if opts.secure_boot && !opts.uki {
+        if opts.secure_boot {
             println!("      -machine q35,smm=on \\");
             println!("      -global driver=cfi.pflash01,property=secure,value=on \\");
             println!(
@@ -145,15 +170,32 @@ fn prepare_device(opts: &ToDiskOpts) -> Result<(PathBuf, Option<String>)> {
 // Core installation
 // ---------------------------------------------------------------------------
 
+struct InstallOpts<'a> {
+    filesystem: &'a str,
+    secure_boot: bool,
+    uki: bool,
+    sb_key: Option<&'a Path>,
+    sb_cert: Option<&'a Path>,
+    /// For loopback installs: write a DER copy of the SB cert here so the host
+    /// can enroll it into OVMF_VARS without having to mount the disk image.
+    sb_cert_out: Option<PathBuf>,
+}
+
 fn install_inner(
     dev: &Path,
     image_ref: &str,
-    filesystem: &str,
-    secure_boot: bool,
-    uki: bool,
+    opts: &InstallOpts<'_>,
     mnt_path: &Path,
     mounts: &mut Vec<PathBuf>,
 ) -> Result<()> {
+    let InstallOpts {
+        filesystem,
+        secure_boot,
+        uki,
+        sb_key,
+        sb_cert,
+        ref sb_cert_out,
+    } = *opts;
     let dev_s = dev.to_str().unwrap();
     let efi_p = part(dev, 1);
     let boot_p = part(dev, 2);
@@ -290,6 +332,24 @@ fn install_inner(
         crate::upgrade::patch_bls_entry(&boot_mnt, &digest, image_ref)?;
     }
 
+    // Resolve SB keys early so the TempDir (if we generated them) outlives all
+    // subsequent uses: UKI signing, systemd-boot signing, and key persistence.
+    let _sb_tmpdir: Option<tempfile::TempDir>;
+    let sb_signing: Option<(PathBuf, PathBuf)> = if uki && secure_boot {
+        let (key, cert, tmp) = resolve_sb_keys(sb_key, sb_cert)?;
+        _sb_tmpdir = tmp;
+        Some((key, cert))
+    } else {
+        _sb_tmpdir = None;
+        None
+    };
+
+    if let Some((ref key, ref cert)) = sb_signing {
+        let uki_path = efi_mnt.join("EFI/Linux").join(format!("{digest}.efi"));
+        println!("==> Signing UKI");
+        sign_efi(&uki_path, key, cert)?;
+    }
+
     // cfsctl oci prepare-boot creates state/deploy/<id>/etc/upper/ as the
     // overlayfs upperdir for /etc. Files placed there are visible in the
     // running system's /etc. The ext4 root's /etc is the lowerdir for the
@@ -321,7 +381,11 @@ fn install_inner(
     fs::remove_dir(deploy_dir.join("var")).context("removing placeholder var dir")?;
     symlink("../../var", deploy_dir.join("var")).context("creating shared var symlink")?;
 
-    if uki {
+    if uki && secure_boot {
+        let (key, cert) = sb_signing.as_ref().unwrap();
+        println!("==> Installing Secure Boot EFI chain (shim → signed systemd-boot)");
+        install_systemd_boot_secureboot(&efi_mnt, key, cert)?;
+    } else if uki {
         println!("==> Installing systemd-boot");
         install_systemd_boot(&efi_mnt)?;
     } else if secure_boot {
@@ -379,11 +443,44 @@ fn install_inner(
     run_cmd("cp", &["-ax", "/var/.", shared_var.to_str().unwrap()])?;
 
     println!("==> Writing cbootc config");
-    fs::create_dir_all(shared_var.join("lib/cbootc"))?;
+    let cbootc_dir = shared_var.join("lib/cbootc");
+    fs::create_dir_all(&cbootc_dir)?;
     fs::write(
-        shared_var.join("lib/cbootc/config.toml"),
+        cbootc_dir.join("config.toml"),
         format!("[image]\nref = \"{image_ref}\"\n"),
     )?;
+
+    if let Some((ref key, ref cert)) = sb_signing {
+        println!("==> Persisting Secure Boot keys");
+        fs::copy(key, cbootc_dir.join("sb.key")).context("copying sb.key")?;
+        fs::copy(cert, cbootc_dir.join("sb.crt")).context("copying sb.crt")?;
+        // Append [secureboot] section so `cbootc upgrade` can re-sign future UKIs.
+        let config_path = cbootc_dir.join("config.toml");
+        let mut config_txt = fs::read_to_string(&config_path)?;
+        config_txt.push_str(
+            "\n[secureboot]\nkey = \"/var/lib/cbootc/sb.key\"\ncert = \"/var/lib/cbootc/sb.crt\"\n",
+        );
+        fs::write(&config_path, config_txt)
+            .with_context(|| format!("updating {}", config_path.display()))?;
+
+        // For loopback installs, export a DER copy of the cert next to the disk
+        // image so the host can enroll it into OVMF_VARS without mounting.
+        if let Some(cert_out) = sb_cert_out {
+            run_cmd(
+                "openssl",
+                &[
+                    "x509",
+                    "-in",
+                    cert.to_str().unwrap(),
+                    "-outform",
+                    "DER",
+                    "-out",
+                    cert_out.to_str().unwrap(),
+                ],
+            )?;
+            println!("    SB cert exported to: {}", cert_out.display());
+        }
+    }
 
     println!("==> Syncing");
     Command::new("sync")
@@ -652,4 +749,153 @@ fn run_cmd_output(program: &str, args: &[&str]) -> Result<String> {
         .context("non-UTF-8 output")?
         .trim()
         .to_string())
+}
+
+/// Resolve Secure Boot signing key/cert.
+///
+/// If both are provided they are returned as-is (validated to exist).
+/// If neither is provided, a self-signed 2048-bit RSA pair is generated
+/// inside a temporary directory; the caller must keep the returned
+/// `Option<TempDir>` alive until the files have been copied to persistent
+/// storage.
+fn resolve_sb_keys(
+    key: Option<&Path>,
+    cert: Option<&Path>,
+) -> Result<(PathBuf, PathBuf, Option<tempfile::TempDir>)> {
+    match (key, cert) {
+        (Some(k), Some(c)) => {
+            if !k.exists() {
+                bail!("--sb-key path does not exist: {}", k.display());
+            }
+            if !c.exists() {
+                bail!("--sb-cert path does not exist: {}", c.display());
+            }
+            Ok((k.to_path_buf(), c.to_path_buf(), None))
+        }
+        _ => {
+            println!("==> Generating Secure Boot signing key pair");
+            let tmp = tempfile::TempDir::new().context("creating temp dir for SB keys")?;
+            let key_path = tmp.path().join("sb.key");
+            let cert_path = tmp.path().join("sb.crt");
+            run_cmd(
+                "openssl",
+                &[
+                    "req",
+                    "-newkey",
+                    "rsa:2048",
+                    "-nodes",
+                    "-keyout",
+                    key_path.to_str().unwrap(),
+                    "-new",
+                    "-x509",
+                    "-sha256",
+                    "-days",
+                    "3650",
+                    "-subj",
+                    "/CN=composefs-os Secure Boot/",
+                    "-out",
+                    cert_path.to_str().unwrap(),
+                ],
+            )?;
+            Ok((key_path, cert_path, Some(tmp)))
+        }
+    }
+}
+
+/// Sign an EFI binary in-place with `sbsign`.
+pub(crate) fn sign_efi(target: &Path, key: &Path, cert: &Path) -> Result<()> {
+    run_cmd(
+        "sbsign",
+        &[
+            "--key",
+            key.to_str().unwrap(),
+            "--cert",
+            cert.to_str().unwrap(),
+            "--output",
+            target.to_str().unwrap(),
+            target.to_str().unwrap(),
+        ],
+    )
+}
+
+/// Sign `src` EFI binary, writing the signed output to `dst`.
+fn sign_efi_to(src: &Path, dst: &Path, key: &Path, cert: &Path) -> Result<()> {
+    run_cmd(
+        "sbsign",
+        &[
+            "--key",
+            key.to_str().unwrap(),
+            "--cert",
+            cert.to_str().unwrap(),
+            "--output",
+            dst.to_str().unwrap(),
+            src.to_str().unwrap(),
+        ],
+    )
+}
+
+/// Install signed systemd-boot for the UKI + Secure Boot path.
+///
+/// No shim: the firmware verifies systemd-boot and the UKI directly against
+/// its Signature Database (db).  The signing cert must be enrolled in the db
+/// once (via the UEFI setup menu or efi-updatevar) before Secure Boot is
+/// enforced.
+///
+/// Layout on the ESP:
+///   EFI/BOOT/BOOTx64.EFI            ← signed systemd-boot (UEFI fallback path)
+///   EFI/systemd/systemd-bootx64.efi ← same binary (NVRAM boot entry path)
+///   EFI/BOOT/composefs-os-sb.cer    ← DER cert for one-time db enrollment
+fn install_systemd_boot_secureboot(efi_mnt: &Path, key: &Path, cert: &Path) -> Result<()> {
+    let sdboot_src = Path::new("/usr/lib/systemd/boot/efi/systemd-bootx64.efi");
+    if !sdboot_src.exists() {
+        bail!(
+            "systemd-boot EFI binary not found at {}. \
+             The image must be built with --target uki-secureboot.",
+            sdboot_src.display()
+        );
+    }
+
+    // Sign systemd-boot into a temp file, then place it on the ESP.
+    let signed_tmp = tempfile::Builder::new()
+        .suffix(".efi")
+        .tempfile()
+        .context("creating temp file for signed systemd-boot")?;
+    sign_efi_to(sdboot_src, signed_tmp.path(), key, cert)?;
+
+    let boot_dir = efi_mnt.join("EFI/BOOT");
+    fs::create_dir_all(&boot_dir)?;
+    // Firmware's UEFI fallback path — loaded when no NVRAM boot entry exists.
+    fs::copy(signed_tmp.path(), boot_dir.join("BOOTx64.EFI"))
+        .context("copying signed systemd-boot → EFI/BOOT/BOOTx64.EFI")?;
+
+    let systemd_dir = efi_mnt.join("EFI/systemd");
+    fs::create_dir_all(&systemd_dir)?;
+    fs::copy(signed_tmp.path(), systemd_dir.join("systemd-bootx64.efi"))
+        .context("copying signed systemd-boot → EFI/systemd/")?;
+
+    // Export DER cert so the user can enroll it into the UEFI db once:
+    //   Via UEFI setup menu: Secure Boot → Key Management → DB → Add from File
+    //   Via efi-updatevar:   efi-updatevar -a -c /boot/efi/EFI/BOOT/composefs-os-sb.cer db
+    run_cmd(
+        "openssl",
+        &[
+            "x509",
+            "-in",
+            cert.to_str().unwrap(),
+            "-outform",
+            "DER",
+            "-out",
+            boot_dir.join("composefs-os-sb.cer").to_str().unwrap(),
+        ],
+    )?;
+
+    println!(
+        "    Enroll the signing cert into the UEFI Signature Database (db) once:\n\
+         \t  UEFI setup menu → Secure Boot → Key Management → DB → Add from File\n\
+         \t    select EFI/BOOT/composefs-os-sb.cer on the ESP\n\
+         \t  or from a running system:\n\
+         \t    efi-updatevar -a -c /boot/efi/EFI/BOOT/composefs-os-sb.cer db"
+    );
+
+    Ok(())
 }

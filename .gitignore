@@ -2,3 +2,5 @@
 *.qcow2
 *.img
 *.raw
+*.raw.sb.cer
+ovmf-vars-*.fd

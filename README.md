@@ -23,6 +23,7 @@ See [DESIGN.md](DESIGN.md) for rationale and architecture.
 |-------|-----------|--------|
 | `ghcr.io/henrywang/composefs-os:fedora-44` | GRUB (BLS Type 1) | Working |
 | `ghcr.io/henrywang/composefs-os:fedora-44-uki` | systemd-boot + UKI (BLS Type 2) | Working |
+| `ghcr.io/henrywang/composefs-os:fedora-44-uki-sb` | systemd-boot + UKI + Secure Boot | Working |
 | Ubuntu | — | Planned |
 | Arch Linux | — | Planned |
 
@@ -103,6 +104,45 @@ qemu-system-x86_64 -enable-kvm -m 4096 \
 `cbootc rollback` automatically detects the boot style — it uses
 `bootctl set-next` on UKI systems and `grub2-editenv` on GRUB systems.
 
+### UKI + Secure Boot
+
+The `-uki-sb` image combines UKI with Secure Boot enforcement. At install time
+`cbootc` generates a self-signed key pair (or accepts `--sb-key`/`--sb-cert`),
+signs both systemd-boot and the UKI `.efi`, and installs signed systemd-boot
+directly as `BOOTx64.EFI` — no shim required. The firmware verifies the binaries
+against its Signature Database (db).
+
+The signing cert must be enrolled in the UEFI db once before Secure Boot
+enforcement will allow booting. For QEMU testing, `prep_sb_vars.py` does this
+automatically using `virt-fw-vars` (`dnf install python3-virt-firmware`):
+
+```sh
+# Install
+sudo podman run --rm --privileged \
+    -v $(pwd):/output \
+    -v /var/lib/containers:/var/lib/containers \
+    -v /var/tmp:/var/tmp \
+    ghcr.io/henrywang/composefs-os:fedora-44-uki-sb \
+    cbootc install to-disk /output/disk-uki-sb.raw --size 10G --uki --secure-boot
+# disk-uki-sb.raw.sb.cer is written alongside the disk image
+
+# Enroll the cert into a copy of OVMF_VARS
+python3 tests/prep_sb_vars.py disk-uki-sb.raw ovmf-vars-uki-sb.fd
+
+# Boot with Secure Boot enforcement
+qemu-system-x86_64 -enable-kvm -m 4096 \
+    -machine q35,smm=on \
+    -global driver=cfi.pflash01,property=secure,value=on \
+    -drive file=disk-uki-sb.raw,if=virtio \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/ovmf/OVMF_CODE.secboot.fd \
+    -drive if=pflash,format=raw,file=ovmf-vars-uki-sb.fd \
+    -nographic
+```
+
+On bare metal, enroll via the UEFI setup menu (**Secure Boot → Key Management →
+Authorized Signatures → Add**) selecting `EFI/BOOT/composefs-os-sb.cer` from the
+ESP. `cbootc upgrade` automatically re-signs new UKIs using the persisted key.
+
 ## Building a Custom Image
 
 The published base images are a starting point. Add your own packages and
@@ -150,7 +190,7 @@ survives upgrades. `cbootc-update.timer` (enabled in the base image) runs
 
 ```
 composefs-os/
-  Containerfile.base         Builds Fedora 44 base images (--target grub | uki)
+  Containerfile.base         Builds Fedora 44 base images (--target grub | uki | uki-secureboot)
   src/                       cbootc source (Rust)
   units/
     cbootc-update.service    Systemd service for automatic upgrades
@@ -207,8 +247,8 @@ automatically. Remove them manually when disk space is a concern.
 
 ### x86-64 only
 
-Both the standard GRUB install and the `--secure-boot` shim chain are
-hard-coded to `x86_64-efi`. aarch64 and other architectures are not supported.
+All boot paths (GRUB, UKI, UKI + Secure Boot) are hard-coded to `x86_64-efi`.
+aarch64 and other architectures are not supported.
 
 ## License
 

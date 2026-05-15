@@ -23,7 +23,8 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q \
-            just qemu-system-x86 ovmf podman skopeo python3-pexpect
+            just qemu-system-x86 ovmf podman skopeo python3-pexpect \
+            python3-virt-firmware
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -95,6 +96,33 @@ jobs:
           OVMF_VARS=$(find /usr/share -name 'OVMF_VARS.fd' ! -name '*.secboot*' ! -name '*.ms.*' | head -1)
           just e2e-uki disk-uki.raw "$OVMF_VARS"
 
+      - name: Build UKI+SB base image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Containerfile.base
+          target: uki-secureboot
+          push: false
+          load: true
+          tags: composefs-os:fedora-44-uki-sb
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Load UKI+SB base image into podman
+        run: |
+          sudo skopeo copy \
+            docker-daemon:composefs-os:fedora-44-uki-sb \
+            containers-storage:localhost/composefs-os:fedora-44-uki-sb
+
+      - name: Build UKI+SB test image
+        run: sudo just build-example-uki-secureboot localhost/composefs-os:fedora-44-uki-sb
+
+      - name: Install to disk image (UKI+SB)
+        run: just install-disk-uki-secureboot composefs-os-uki-sb-test:latest disk-uki-sb.raw 5G
+
+      - name: Run e2e tests (UKI+SB)
+        run: just e2e-uki-secureboot disk-uki-sb.raw
+
       - name: Upload disk images on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -104,4 +132,5 @@ jobs:
             disk.raw
             disk-sb.raw
             disk-uki.raw
+            disk-uki-sb.raw
           retention-days: 1

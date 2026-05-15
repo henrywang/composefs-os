@@ -48,3 +48,14 @@ jobs:
           tags: ghcr.io/${{ github.repository_owner }}/composefs-os:fedora-44-uki
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Build and push composefs-os:fedora-44-uki-sb (systemd-boot + UKI + Secure Boot)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Containerfile.base
+          target: uki-secureboot
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/composefs-os:fedora-44-uki-sb
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -60,6 +60,11 @@ pub fn run(reboot: bool) -> Result<()> {
     if Path::new(EFI_LINUX_DIR).exists() {
         println!("Building UKI ...");
         build_uki(Path::new(BOOT_DIR), Path::new(EFI_ESP), &digest)?;
+        if let Some(sb) = config::secureboot()? {
+            let uki_path = Path::new(EFI_LINUX_DIR).join(format!("{digest}.efi"));
+            println!("Signing UKI ...");
+            crate::install::sign_efi(&uki_path, Path::new(&sb.key), Path::new(&sb.cert))?;
+        }
     } else {
         patch_bls_entry(Path::new(BOOT_DIR), &digest, &image_ref)?;
     }

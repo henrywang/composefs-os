@@ -203,6 +203,11 @@ def main():
         action="store_true",
         help="Test a UKI/systemd-boot disk image instead of a GRUB image",
     )
+    parser.add_argument(
+        "--uki-secureboot",
+        action="store_true",
+        help="Test a UKI + Secure Boot disk image (requires secboot OVMF with cert enrolled in db)",
+    )
     args = parser.parse_args()
 
     ovmf_vars_tmp = None
@@ -222,6 +227,23 @@ def main():
             os.close(fd)
             shutil.copy2(ovmf_vars_src, ovmf_vars_tmp)
             tests = [test_secure_boot_enabled] + GRUB_TESTS
+        elif args.uki_secureboot:
+            sb_code, sb_vars = find_ovmf_secboot()
+            ovmf_code = args.ovmf or sb_code
+            ovmf_vars_src = args.ovmf_vars or sb_vars
+            if not ovmf_code or not ovmf_vars_src:
+                print(
+                    "ERROR: Secure Boot OVMF firmware not found. "
+                    "Install edk2-ovmf (Fedora) or ovmf (Ubuntu), "
+                    "or pass --ovmf / --ovmf-vars."
+                )
+                sys.exit(1)
+            fd, ovmf_vars_tmp = tempfile.mkstemp(suffix=".fd")
+            os.close(fd)
+            shutil.copy2(ovmf_vars_src, ovmf_vars_tmp)
+            # test_secure_boot_enabled requires the signing cert pre-enrolled in
+            # OVMF_VARS db — use prep_sb_vars.py or pass a prepared --ovmf-vars.
+            tests = [test_secure_boot_enabled] + UKI_TESTS
         elif args.uki:
             ovmf_code = args.ovmf or find_ovmf()
             if not ovmf_code:

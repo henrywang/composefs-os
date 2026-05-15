@@ -121,16 +121,20 @@ via sfdisk), formatting, composefs repo initialisation, EFI setup, and
 shared-var wiring. Running inside the container means the source image is always
 the container itself — no separate image reference needed at install time.
 
-Two EFI boot modes are supported via `--secure-boot`:
+Three EFI boot paths are supported:
 
-- **Default:** runs `grub2-install --target=x86_64-efi` to generate a GRUB EFI
-  binary. Works on any EFI system; rejected by firmware with Secure Boot enabled.
-- **`--secure-boot`:** copies the pre-signed shim (`shimx64.efi`) and Fedora-signed
-  GRUB (`grubx64.efi`) from `/usr/share/efi/` (preserved in the base image at
-  build time) to the ESP. The full GRUB config is written directly to the ESP so
-  GRUB can resolve BLS entries without crossing partition boundaries under Secure
-  Boot lockdown. No custom key enrollment required — the Microsoft-signed shim
-  trusts the Fedora-signed GRUB out of the box.
+- **Default (GRUB):** runs `grub2-install --target=x86_64-efi`. Works on any EFI
+  system; rejected by firmware with Secure Boot enabled.
+- **`--secure-boot` (GRUB + SB):** copies the Fedora-signed shim + GRUB from
+  `/usr/share/efi/` (preserved in the base image at build time) to the ESP. No
+  custom key enrollment required — the Microsoft-signed shim trusts the
+  Fedora-signed GRUB out of the box.
+- **`--uki --secure-boot` (UKI + SB):** generates a self-signed key pair (or
+  accepts `--sb-key`/`--sb-cert`), signs systemd-boot and the UKI `.efi` with
+  `sbsign`, and installs signed systemd-boot directly as `BOOTx64.EFI` — no
+  shim. The firmware verifies binaries directly against its Signature Database
+  (db). The signing cert must be enrolled in the db once; the key is persisted
+  in `/var/lib/cbootc/` so `cbootc upgrade` can re-sign future UKIs.
 
 ## Command Surface
 
