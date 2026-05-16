@@ -453,6 +453,22 @@ def test_rolled_back_digest_active(child, expected_digest):
     )
 
 
+def _diag(child, label):
+    """Run diagnostic commands for debugging; never raises."""
+    print(f"\n--- DIAG: {label} ---")
+    for cmd in [
+        "which bootctl 2>&1 || echo 'bootctl not found'",
+        "bootctl --version 2>&1 | head -1 || true",
+        "mount | grep -E 'boot|efi' || echo 'no boot/efi mounts'",
+        "ls /boot/efi/EFI/Linux/ 2>&1 || echo 'EFI/Linux not accessible'",
+        "ls /sys/firmware/efi/efivars/ 2>&1 | wc -l || echo 'no efivars'",
+        "bootctl status 2>&1 | head -20 || true",
+    ]:
+        _, out = run_cmd(child, cmd)
+        print(out.strip())
+    print(f"--- END DIAG: {label} ---\n")
+
+
 def run_upgrade_sequence(disk_image, ovmf_code, registry, uki=False,
                          secure_boot=False, ovmf_vars=None):
     """Three-boot upgrade → rollback sequence on a sparse copy of disk_image.
@@ -494,6 +510,9 @@ def run_upgrade_sequence(disk_image, ovmf_code, registry, uki=False,
             step("configure_guest_network", configure_guest_network, child)
             step("wait_for_network", wait_for_network, child)
 
+            if uki:
+                _diag(child, "before switch_to_v2 (UKI)")
+
             image_ref = (
                 f"docker://{REGISTRY_HOST}:{registry.port}/test-image:latest"
             )
@@ -515,6 +534,9 @@ def run_upgrade_sequence(disk_image, ovmf_code, registry, uki=False,
 
             if secure_boot:
                 step("secure_boot_enabled_boot2", test_secure_boot_enabled, child)
+
+            if uki:
+                _diag(child, "before rollback_succeeds (UKI Boot 2)")
 
             step("rollback_succeeds", test_rollback_succeeds, child)
 
