@@ -86,7 +86,7 @@ FROM rootfs-base AS rootfs-uki-sb
 RUN apt-get update && apt-get install -y --no-install-recommends \
         systemd-boot-efi \
         systemd-ukify \
-        sbsigntools \
+        sbsigntool \
         openssl \
     && rm -rf /var/lib/apt/lists/*
 
