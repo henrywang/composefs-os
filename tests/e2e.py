@@ -351,9 +351,22 @@ def configure_guest_network(child):
     """Assign a static IP to the first non-loopback interface (TAP network)."""
     rc, out = run_cmd(
         child,
-        "iface=$(ip -br link show | awk '!/^lo/{print $1}' | head -1); "
-        f"ip addr add {TAP_GUEST_IP}/{TAP_CIDR} dev $iface 2>/dev/null; "
-        f"ip link set $iface up",
+        # Wait up to 15 s for the virtio-net device to be visible.  On Fedora
+        # the autologin shell fires while udev is still renaming the interface,
+        # so the device is not immediately present in ip-link output.
+        "iface=''; "
+        "for i in $(seq 1 15); do "
+        "  iface=$(ip -br link show | awk '!/^lo/{print $1}' | head -1); "
+        "  [ -n \"$iface\" ] && break; sleep 1; "
+        "done; "
+        # Tell NetworkManager to stop managing this interface so it cannot
+        # override the static IP we are about to assign.
+        "nmcli dev set \"$iface\" managed no 2>/dev/null; "
+        # Flush any NM-assigned or stale addresses, then add ours.
+        f"ip addr flush dev \"$iface\" 2>/dev/null; "
+        f"ip addr add {TAP_GUEST_IP}/{TAP_CIDR} dev \"$iface\"; "
+        f"ip link set \"$iface\" up",
+        timeout=20,
     )
     assert rc == 0, f"failed to configure guest network:\n{out}"
 
