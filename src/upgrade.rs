@@ -229,7 +229,7 @@ pub fn write_grub_menuentry_cfg(bootdir: &Path, grub_subdir: &str) -> Result<()>
     }
 
     // Newest first → index 0 is the default boot entry.
-    bls.sort_by(|a, b| b.0.cmp(&a.0));
+    bls.sort_by_key(|b| std::cmp::Reverse(b.0));
 
     let grub_boot_dir = bootdir.join(grub_subdir);
     fs::create_dir_all(&grub_boot_dir).context("creating grub boot dir")?;

@@ -68,12 +68,9 @@ fn entry_id(path: &Path) -> &str {
 const EFI_LINUX_DIR: &str = "/boot/efi/EFI/Linux";
 
 fn grubenv_path() -> Option<&'static str> {
-    for p in ["/boot/grub2/grubenv", "/boot/grub/grubenv"] {
-        if Path::new(p).exists() {
-            return Some(p);
-        }
-    }
-    None
+    ["/boot/grub2/grubenv", "/boot/grub/grubenv"]
+        .into_iter()
+        .find(|&p| Path::new(p).exists())
 }
 
 fn set_next_entry(id: &str) -> Result<()> {
