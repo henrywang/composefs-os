@@ -67,6 +67,11 @@ pub fn run(reboot: bool) -> Result<()> {
         }
     } else {
         patch_bls_entry(Path::new(BOOT_DIR), &digest, &image_ref)?;
+        if !crate::install::has_grub2() {
+            // Ubuntu: regenerate menuentry-based grub.cfg so the new deployment
+            // appears in the menu (blscfg.mod is not available on Ubuntu).
+            write_grub_menuentry_cfg(Path::new(BOOT_DIR), crate::install::grub_dir())?;
+        }
     }
 
     // Wire the new deployment's var to the shared /sysroot/state/var so
@@ -179,6 +184,81 @@ pub fn patch_bls_entry(bootdir: &Path, digest: &str, image_ref: &str) -> Result<
         + "\n";
 
     fs::write(&entry_path, patched).with_context(|| format!("writing {}", entry_path.display()))
+}
+
+/// Generate a traditional GRUB menuentry config from all BLS entries in
+/// `bootdir/loader/entries/`.  Used on distros (Ubuntu/Debian) that do not
+/// ship `blscfg.mod` in their GRUB package.
+///
+/// Each entry gets `--id <digest>` so that rollback's `next_entry=<digest>`
+/// in grubenv correctly selects the previous deployment.
+pub fn write_grub_menuentry_cfg(bootdir: &Path, grub_subdir: &str) -> Result<()> {
+    let entries_dir = bootdir.join("loader/entries");
+    let mut bls: Vec<(std::time::SystemTime, String, String, String)> = Vec::new();
+
+    if entries_dir.exists() {
+        for item in fs::read_dir(&entries_dir).context("reading BLS entries")? {
+            let item = item?;
+            let path = item.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("conf") {
+                continue;
+            }
+            let mtime = item
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            let content =
+                fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+            let digest = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_owned();
+            let title = content
+                .lines()
+                .find(|l| l.starts_with("title "))
+                .map(|l| l["title ".len()..].trim().to_owned())
+                .unwrap_or_else(|| digest[..digest.len().min(12)].to_owned());
+            let options = content
+                .lines()
+                .find(|l| l.starts_with("options "))
+                .map(|l| l["options ".len()..].trim().to_owned())
+                .unwrap_or_default();
+            bls.push((mtime, title, digest, options));
+        }
+    }
+
+    // Newest first → index 0 is the default boot entry.
+    bls.sort_by_key(|b| std::cmp::Reverse(b.0));
+
+    let grub_boot_dir = bootdir.join(grub_subdir);
+    fs::create_dir_all(&grub_boot_dir).context("creating grub boot dir")?;
+
+    let mut cfg = String::from(
+        "serial --unit=0 --speed=115200\n\
+         terminal_input serial console\n\
+         terminal_output serial console\n\
+         load_env\n\
+         if [ \"${next_entry}\" ] ; then\n\
+           set default=\"${next_entry}\"\n\
+           set next_entry=\n\
+           save_env next_entry\n\
+         fi\n\
+         set timeout=3\n\n",
+    );
+
+    for (_mtime, title, digest, options) in &bls {
+        cfg.push_str(&format!(
+            "menuentry \"{title}\" --id {digest} {{\n\
+             \tsearch --no-floppy --label --set=root boot\n\
+             \tlinux /{digest}/vmlinuz {options}\n\
+             \tinitrd /{digest}/initramfs.img\n\
+             }}\n\n"
+        ));
+    }
+
+    let cfg_path = grub_boot_dir.join("grub.cfg");
+    fs::write(&cfg_path, &cfg).with_context(|| format!("writing {}", cfg_path.display()))
 }
 
 /// Read the running kernel cmdline, stripping the composefs= token so

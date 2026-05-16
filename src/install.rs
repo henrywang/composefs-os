@@ -390,14 +390,14 @@ fn install_inner(
         install_systemd_boot(&efi_mnt)?;
     } else if secure_boot {
         println!("==> Installing Secure Boot EFI chain (shim → grub)");
-        install_shim_efi(&efi_mnt, &boot_uuid)?;
-    } else {
-        println!("==> Installing GRUB");
-        let grub = grub_install_bin();
+        install_shim_efi(&efi_mnt, &boot_uuid, grub_dir())?;
+    } else if has_grub2() {
+        // Fedora: grub2-install reliably embeds the boot partition UUID.
+        println!("==> Installing GRUB (grub2-install)");
         let efi_dir_arg = format!("--efi-directory={}", efi_mnt.display());
         let boot_dir_arg = format!("--boot-directory={}", boot_mnt.display());
         run_cmd(
-            grub,
+            "grub2-install",
             &[
                 "--target=x86_64-efi",
                 efi_dir_arg.as_str(),
@@ -408,33 +408,46 @@ fn install_inner(
                 "--force",
             ],
         )?;
+    } else {
+        // Ubuntu/Debian: grub-install can't reliably detect the boot partition
+        // UUID inside a container.  Use grub-mkstandalone to build a
+        // self-contained EFI binary with a label-based search embedded, then
+        // copy the grub module tree to the boot partition manually.
+        println!("==> Installing GRUB (grub-mkstandalone)");
+        install_grub_standalone(&efi_mnt, &boot_mnt, grub_dir())?;
     }
 
     if !uki {
         println!("==> Writing grub.cfg");
-        let grub2_dir = boot_mnt.join("grub2");
-        fs::create_dir_all(&grub2_dir)?;
-        fs::write(
-            grub2_dir.join("grub.cfg"),
-            "serial --unit=0 --speed=115200\n\
-             terminal_input serial console\n\
-             terminal_output serial console\n\
-             load_env\n\
-             if [ \"${next_entry}\" ] ; then\n\
-               set default=\"${next_entry}\"\n\
-               set next_entry=\n\
-               save_env next_entry\n\
-             fi\n\
-             set timeout=3\n\
-             insmod ext2\n\
-             function load_video { true; }\n\
-             insmod blscfg\n\
-             blscfg\n",
-        )?;
+        let grub_subdir = grub_dir();
+        let grub_boot_dir = boot_mnt.join(grub_subdir);
+        fs::create_dir_all(&grub_boot_dir)?;
+        if has_grub2() {
+            // Fedora: grub2 has blscfg.mod — BLS entries are scanned natively.
+            fs::write(
+                grub_boot_dir.join("grub.cfg"),
+                "serial --unit=0 --speed=115200\n\
+                 terminal_input serial console\n\
+                 terminal_output serial console\n\
+                 load_env\n\
+                 if [ \"${next_entry}\" ] ; then\n\
+                   set default=\"${next_entry}\"\n\
+                   set next_entry=\n\
+                   save_env next_entry\n\
+                 fi\n\
+                 set timeout=3\n\
+                 insmod ext2\n\
+                 function load_video { true; }\n\
+                 insmod blscfg\n\
+                 blscfg\n",
+            )?;
+        } else {
+            // Ubuntu/Debian: no blscfg.mod — generate traditional menuentry blocks.
+            crate::upgrade::write_grub_menuentry_cfg(&boot_mnt, grub_subdir)?;
+        }
 
         println!("==> Creating grubenv");
-        let grubenv = grub2_dir.join("grubenv");
-        grub_editenv_create(grubenv.to_str().unwrap())?;
+        grub_editenv_create(grub_boot_dir.join("grubenv").to_str().unwrap())?;
     }
 
     println!("==> Populating /var from image");
@@ -639,15 +652,69 @@ fn install_systemd_boot(efi_mnt: &Path) -> Result<()> {
     Ok(())
 }
 
-fn install_shim_efi(efi_mnt: &Path, boot_uuid: &str) -> Result<()> {
-    let src = Path::new("/usr/share/efi/EFI/fedora");
-    if !src.exists() {
-        bail!(
-            "Secure Boot EFI binaries not found at {}. \
-             The image must be built from Containerfile.base which preserves shim-x64/grub2-efi-x64 binaries.",
-            src.display()
-        );
+fn install_grub_standalone(efi_mnt: &Path, boot_mnt: &Path, grub_subdir: &str) -> Result<()> {
+    // Build a self-contained EFI binary: embed a tiny config that searches the
+    // boot partition by label ("boot") so no UUID detection is needed at
+    // install time.  Include the modules needed so the EFI binary can load the
+    // main grub.cfg (with blscfg/load_env) from the boot partition directly.
+    let stub = format!(
+        "search --no-floppy --label --set=root boot\n\
+         set prefix=($root)/{grub_subdir}\n\
+         configfile $prefix/grub.cfg\n"
+    );
+    let stub_path = "/tmp/cbootc-grub-stub.cfg";
+    fs::write(stub_path, &stub).context("writing grub stub config")?;
+
+    let boot_dir = efi_mnt.join("EFI/BOOT");
+    fs::create_dir_all(&boot_dir)?;
+    let efi_out = boot_dir.join("BOOTx64.EFI");
+    run_cmd(
+        "grub-mkstandalone",
+        &[
+            "--format=x86_64-efi",
+            // Modules needed by the embedded stub AND by the boot-partition
+            // grub.cfg that configfile loads: serial/terminal for console,
+            // loadenv/normal for load_env+menuentry, linux for kernel loading.
+            "--modules=ext2 part_gpt fat search search_label \
+                       configfile loadenv normal linux serial terminal",
+            &format!("--output={}", efi_out.display()),
+            &format!("boot/grub/grub.cfg={stub_path}"),
+        ],
+    )?;
+
+    // Copy the full grub module tree to the boot partition so that
+    // `insmod` calls in grub.cfg (locale files, extra modules) can resolve.
+    let grub_boot_dir = boot_mnt.join(grub_subdir);
+    fs::create_dir_all(&grub_boot_dir)?;
+    run_cmd(
+        "cp",
+        &[
+            "-r",
+            "/usr/lib/grub/x86_64-efi",
+            grub_boot_dir.to_str().unwrap(),
+        ],
+    )?;
+
+    Ok(())
+}
+
+fn find_shim_dir() -> Result<PathBuf> {
+    let efi_dir = Path::new("/usr/share/efi/EFI");
+    for entry in fs::read_dir(efi_dir).context("reading /usr/share/efi/EFI")? {
+        let e = entry?;
+        if e.file_type()?.is_dir() && e.path().join("shimx64.efi").exists() {
+            return Ok(e.path());
+        }
     }
+    bail!(
+        "Secure Boot EFI binaries not found in /usr/share/efi/EFI/*/shimx64.efi. \
+         The image must be built from a Containerfile with the grub target \
+         (shim-signed/grub-efi binaries preserved at that path)."
+    )
+}
+
+fn install_shim_efi(efi_mnt: &Path, boot_uuid: &str, grub_subdir: &str) -> Result<()> {
+    let src = find_shim_dir()?;
 
     let boot_dst = efi_mnt.join("EFI/BOOT");
     fs::create_dir_all(&boot_dst)?;
@@ -661,57 +728,73 @@ fn install_shim_efi(efi_mnt: &Path, boot_uuid: &str) -> Result<()> {
         fs::copy(&mm, boot_dst.join("mmx64.efi")).context("copy mmx64.efi")?;
     }
 
-    // Also populate EFI/fedora/ for NVRAM-based boot entries and as a fallback
-    // for grub binaries that have EFI/fedora/ compiled as their search prefix.
-    let fedora_dst = efi_mnt.join("EFI/fedora");
-    fs::create_dir_all(&fedora_dst)?;
-    fs::copy(src.join("shimx64.efi"), fedora_dst.join("shimx64.efi"))
-        .context("copy shimx64.efi → EFI/fedora/")?;
-    fs::copy(src.join("grubx64.efi"), fedora_dst.join("grubx64.efi"))
-        .context("copy grubx64.efi → EFI/fedora/")?;
+    // Also populate EFI/<distro>/ for NVRAM-based boot entries and as a fallback
+    // for grub binaries that have EFI/<distro>/ compiled as their search prefix
+    // (e.g. EFI/fedora for Fedora, EFI/ubuntu for Ubuntu).
+    let distro_name = src.file_name().unwrap().to_string_lossy();
+    let distro_dst = efi_mnt.join(format!("EFI/{distro_name}"));
+    fs::create_dir_all(&distro_dst)?;
+    fs::copy(src.join("shimx64.efi"), distro_dst.join("shimx64.efi"))
+        .with_context(|| format!("copy shimx64.efi → EFI/{distro_name}/"))?;
+    fs::copy(src.join("grubx64.efi"), distro_dst.join("grubx64.efi"))
+        .with_context(|| format!("copy grubx64.efi → EFI/{distro_name}/"))?;
 
-    // The Fedora-signed grubx64.efi has /EFI/fedora compiled as its prefix, so
-    // it reads EFI/fedora/grub.cfg from the ESP.  Rather than a stub that calls
-    // configfile across to /boot (which hits Secure Boot lockdown restrictions
-    // and leaves $root pointing at the ESP so blscfg can't find kernel files),
-    // write the full grub config directly on the ESP.  search --set=root
-    // anchors $root to the /boot partition so load_env, grubenv writes, and
-    // blscfg kernel path resolution all work correctly without any indirection.
-    let esp_grub_cfg = format!(
-        "serial --unit=0 --speed=115200\n\
-         terminal_input serial console\n\
-         terminal_output serial console\n\
-         search --no-floppy --fs-uuid --set=root {boot_uuid}\n\
-         set prefix=($root)/grub2\n\
-         load_env\n\
-         if [ \"${{next_entry}}\" ] ; then\n\
-           set default=\"${{next_entry}}\"\n\
-           set next_entry=\n\
-           save_env next_entry\n\
-         fi\n\
-         set timeout=3\n\
-         insmod ext2\n\
-         function load_video {{ true; }}\n\
-         insmod blscfg\n\
-         blscfg\n"
-    );
+    // The signed grubx64.efi has the distro prefix compiled in so it reads
+    // EFI/<distro>/grub.cfg from the ESP.
+    //
+    // Fedora's grub2 has blscfg.mod: write the full BLS-scanning config here.
+    // Ubuntu's grub does not ship blscfg.mod: write a redirect stub to the
+    // boot partition's menuentry-based grub.cfg (generated separately).
+    let esp_grub_cfg = if has_grub2() {
+        format!(
+            "serial --unit=0 --speed=115200\n\
+             terminal_input serial console\n\
+             terminal_output serial console\n\
+             search --no-floppy --fs-uuid --set=root {boot_uuid}\n\
+             set prefix=($root)/{grub_subdir}\n\
+             load_env\n\
+             if [ \"${{next_entry}}\" ] ; then\n\
+               set default=\"${{next_entry}}\"\n\
+               set next_entry=\n\
+               save_env next_entry\n\
+             fi\n\
+             set timeout=3\n\
+             insmod ext2\n\
+             function load_video {{ true; }}\n\
+             insmod blscfg\n\
+             blscfg\n"
+        )
+    } else {
+        // grubx64.efi.signed (Ubuntu) has ext2 and common modules built in.
+        // Redirect to the boot partition's menuentry-based grub.cfg so that
+        // upgrades only need to regenerate one file rather than touching the ESP.
+        format!(
+            "serial --unit=0 --speed=115200\n\
+             terminal_input serial console\n\
+             terminal_output serial console\n\
+             search --no-floppy --fs-uuid --set=root {boot_uuid}\n\
+             set prefix=($root)/{grub_subdir}\n\
+             configfile $prefix/grub.cfg\n"
+        )
+    };
     fs::write(boot_dst.join("grub.cfg"), &esp_grub_cfg)?;
-    fs::write(fedora_dst.join("grub.cfg"), &esp_grub_cfg)?;
+    fs::write(distro_dst.join("grub.cfg"), &esp_grub_cfg)?;
 
     Ok(())
 }
 
-fn grub_install_bin() -> &'static str {
-    if Command::new("grub2-install")
+pub(crate) fn has_grub2() -> bool {
+    Command::new("grub2-install")
         .arg("--version")
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
-    {
-        "grub2-install"
-    } else {
-        "grub-install"
-    }
+}
+
+// The boot-partition subdirectory where grub writes its modules and config.
+// grub2-install (Fedora) uses "grub2"; grub-install (Ubuntu/Debian) uses "grub".
+pub(crate) fn grub_dir() -> &'static str {
+    if has_grub2() { "grub2" } else { "grub" }
 }
 
 fn grub_editenv_create(path: &str) -> Result<()> {

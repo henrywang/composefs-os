@@ -23,7 +23,7 @@ import sys
 import tempfile
 import pexpect
 
-PROMPT = r"\[root@[^\]]+\]#"
+PROMPT = r"(?:\[root@[^\]]+\]#|root@[^:]+:[^#]*#)"
 TIMEOUT_BOOT = 180
 TIMEOUT_CMD = 30
 
@@ -140,9 +140,12 @@ def test_rollback_no_previous(child):
 
 
 def test_grubenv_exists(child):
-    """/boot/grub2/grubenv must exist (written at install time)."""
-    rc, _ = run_cmd(child, "test -f /boot/grub2/grubenv")
-    assert rc == 0, "/boot/grub2/grubenv not found"
+    """/boot/grub2/grubenv or /boot/grub/grubenv must exist (written at install time)."""
+    rc, _ = run_cmd(
+        child,
+        "test -f /boot/grub2/grubenv || test -f /boot/grub/grubenv",
+    )
+    assert rc == 0, "grubenv not found at /boot/grub2/grubenv or /boot/grub/grubenv"
 
 
 def test_uki_efi_linux(child):
@@ -155,9 +158,9 @@ def test_uki_efi_linux(child):
 
 
 def test_no_grubenv(child):
-    """/boot/grub2/grubenv must NOT exist on a systemd-boot system."""
-    rc, _ = run_cmd(child, "test -f /boot/grub2/grubenv")
-    assert rc != 0, "/boot/grub2/grubenv should not exist in UKI mode"
+    """grubenv must NOT exist on a systemd-boot system."""
+    rc, _ = run_cmd(child, "test -f /boot/grub2/grubenv || test -f /boot/grub/grubenv")
+    assert rc != 0, "grubenv should not exist in UKI mode"
 
 
 def test_var_config(child):

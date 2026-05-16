@@ -123,12 +123,16 @@ the container itself — no separate image reference needed at install time.
 
 Three EFI boot paths are supported:
 
-- **Default (GRUB):** runs `grub2-install --target=x86_64-efi`. Works on any EFI
-  system; rejected by firmware with Secure Boot enabled.
-- **`--secure-boot` (GRUB + SB):** copies the Fedora-signed shim + GRUB from
-  `/usr/share/efi/` (preserved in the base image at build time) to the ESP. No
-  custom key enrollment required — the Microsoft-signed shim trusts the
-  Fedora-signed GRUB out of the box.
+- **Default (GRUB):** on Fedora, runs `grub2-install --target=x86_64-efi`; on
+  Ubuntu/Debian (which do not have `grub2-install`), builds a self-contained EFI
+  binary with `grub-mkstandalone` and generates a traditional `menuentry`-based
+  `grub.cfg` (Ubuntu does not ship `blscfg.mod`). Works on any EFI system;
+  rejected by firmware with Secure Boot enabled.
+- **`--secure-boot` (GRUB + SB):** copies the distro-signed shim + GRUB from
+  `/usr/share/efi/EFI/<distro>/` (preserved in the base image at build time) to
+  the ESP. The auto-detected distro subdirectory ensures the signed GRUB's
+  compiled-in search prefix matches. No custom key enrollment required — the
+  Microsoft-signed shim trusts the distro-signed GRUB out of the box.
 - **`--uki --secure-boot` (UKI + SB):** generates a self-signed key pair (or
   accepts `--sb-key`/`--sb-cert`), signs systemd-boot and the UKI `.efi` with
   `sbsign`, and installs signed systemd-boot directly as `BOOTx64.EFI` — no
@@ -154,7 +158,7 @@ That's it. Five commands. Compare to bootc's ~15.
 /sysroot/composefs/                  cfsctl repo (objects, images, streams)
 /boot/                               kernel + initramfs + BLS entries
 /boot/loader/entries/<digest>.conf   BLS snippet with composefs=<digest>
-/boot/grub2/grubenv                  GRUB env block (next_entry for rollback)
+/boot/grub2/grubenv                  GRUB env block (next_entry for rollback; /boot/grub/grubenv on Ubuntu)
 /var/lib/cbootc/config.toml          tracked image reference
 /var/lib/cbootc/state.json           last-upgrade time, last-known-good digest
 /usr/lib/systemd/system/cbootc-*     timer + service for auto-updates (optional)

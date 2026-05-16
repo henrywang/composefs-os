@@ -1,68 +1,48 @@
-# Minimal bootable Ubuntu image for composefs-rs deployment. STUB.
+# Template for a custom Ubuntu composefs-os image.
 #
-# Not yet validated. Same contract as the Fedora image — see DESIGN.md
-# "Multi-Distro Strategy". Use dracut, not initramfs-tools.
+# Pattern:
+#   1. FROM composefs-os:ubuntu-26.04  (or the -uki / -uki-sb variant)
+#   2. Install packages, write config — /etc and /var are normal here
+#   3. Keep the LABEL block at the bottom
 #
-# Build:  podman build -t ubuntu-cfs-minimal:latest -f examples/ubuntu/Containerfile .
+# Build locally:
+#   podman build -t my-ubuntu-cfs:latest \
+#       --build-arg BASE_IMAGE=composefs-os:ubuntu-26.04 \
+#       -f examples/ubuntu/Containerfile .
+#
+# Deploy to a disk image file:
+#   sudo podman run --rm --privileged \
+#       -v $(pwd):/output -v /var/lib/containers:/var/lib/containers \
+#       -v /var/tmp:/var/tmp \
+#       my-ubuntu-cfs:latest cbootc install to-disk /output/disk.raw --size 10G
 
-# ---------------------------------------------------------------------------
-# Stage 0: Build cbootc from source
-# ---------------------------------------------------------------------------
-FROM rust:1-slim AS builder
-WORKDIR /build
-COPY Cargo.toml Cargo.lock ./
-COPY src/ src/
-RUN cargo build --release
+ARG BASE_IMAGE=composefs-os:ubuntu-26.04
+FROM ${BASE_IMAGE}
 
-# ---------------------------------------------------------------------------
-# Stage 1: OS image
-# ---------------------------------------------------------------------------
-FROM ubuntu:24.04
+# --- Customise below this line -------------------------------------------
 
-ENV DEBIAN_FRONTEND=noninteractive
+# Use COPY (not RUN echo) for /etc/hostname: buildah bind-mounts a synthetic
+# /etc/hostname into every RUN container, so writes via RUN are silently lost.
+# COPY writes directly into the image layer without launching a container.
+COPY <<EOF /etc/hostname
+myhost
+EOF
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        linux-image-generic linux-firmware \
-        systemd systemd-sysv udev dbus-broker \
-        util-linux coreutils bash \
-        network-manager iproute2 iputils-ping \
-        e2fsprogs dosfstools btrfs-progs \
-        grub-efi-amd64 grub-efi-amd64-bin shim-signed efibootmgr \
-        dracut dracut-network \
-        vim-tiny less \
-    && apt-get purge -y initramfs-tools initramfs-tools-core \
-    && apt-get autoremove -y \
-    && rm -rf /var/lib/apt/lists/*
+# Serial console autologin — convenient for local QEMU testing.
+# Remove or replace with SSH keys for any internet-facing deployment.
+RUN mkdir -p /usr/lib/systemd/system/serial-getty@ttyS0.service.d && \
+    printf '[Service]\nExecStart=\nExecStart=-/sbin/agetty --autologin root --noclear %%I 115200 vt220\n' \
+        > /usr/lib/systemd/system/serial-getty@ttyS0.service.d/autologin.conf
 
-# Layout adjustments — same as Fedora.
-# Use cp+find instead of mv: container runtime bind-mounts hosts/hostname/resolv.conf.
-RUN if [ -d /etc ] && [ ! -L /etc ]; then \
-        mkdir /usr/etc && \
-        cp -a /etc/. /usr/etc/ && \
-        find /etc -mindepth 1 -maxdepth 1 \
-            ! -name hosts ! -name hostname ! -name resolv.conf \
-            -exec rm -rf {} +; \
-    fi
-RUN if [ -d /var ] && [ ! -L /var ]; then \
-        mkdir -p /usr/share/factory && \
-        mv /var /usr/share/factory/var && \
-        mkdir /var; \
-    fi
-RUN mkdir -p /usr/lib/tmpfiles.d && \
-    printf 'q /var 0755 - - -\nC /var - - - - -\n' \
-        > /usr/lib/tmpfiles.d/00-var-factory.conf
+# Add your packages here, e.g.:
+# RUN apt-get install -y --no-install-recommends vim htop \
+#     && rm -rf /var/lib/apt/lists/*
 
-# TODO: composefs dracut module + dracut invocation, same as Fedora
-
-# ---------------------------------------------------------------------------
-# Install cbootc
-# ---------------------------------------------------------------------------
-COPY --from=builder /build/target/release/cbootc /usr/bin/cbootc
-COPY units/cbootc-update.service units/cbootc-update.timer /usr/lib/systemd/system/
-RUN systemctl enable cbootc-update.timer
+# --- Do not edit below this line ------------------------------------------
 
 LABEL containers.bootc=1
 LABEL composefs.backend=cfs-rs
-LABEL org.opencontainers.image.title="Ubuntu Minimal (composefs-rs)"
+LABEL org.opencontainers.image.title="My Ubuntu composefs-os image"
+LABEL org.opencontainers.image.version="26.04"
 
 CMD ["/sbin/init"]

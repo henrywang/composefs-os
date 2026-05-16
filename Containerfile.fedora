@@ -5,8 +5,8 @@
 #   --target uki   systemd-boot + UKI (BLS Type 2, cmdline embedded at build time)
 #
 # Build:
-#   podman build -t composefs-os:fedora-44       -f Containerfile.base .          # GRUB
-#   podman build -t composefs-os:fedora-44-uki   --target uki -f Containerfile.base .
+#   podman build -t composefs-os:fedora-44       -f Containerfile.fedora .          # GRUB
+#   podman build -t composefs-os:fedora-44-uki   --target uki -f Containerfile.fedora .
 
 # ---------------------------------------------------------------------------
 # Stage 0a: Build cbootc

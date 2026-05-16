@@ -21,7 +21,12 @@ FROM ${BASE_IMAGE}
 
 # --- Customise below this line -------------------------------------------
 
-RUN echo 'myhost' > /etc/hostname
+# Use COPY (not RUN echo) for /etc/hostname: buildah bind-mounts a synthetic
+# /etc/hostname into every RUN container, so writes via RUN are silently lost.
+# COPY writes directly into the image layer without launching a container.
+COPY <<EOF /etc/hostname
+myhost
+EOF
 
 # Serial console autologin — convenient for local QEMU testing.
 # Remove or replace with SSH keys for any internet-facing deployment.

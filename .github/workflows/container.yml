@@ -31,7 +31,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: Containerfile.base
+          file: Containerfile.fedora
           target: grub
           push: true
           tags: ghcr.io/${{ github.repository_owner }}/composefs-os:fedora-44
@@ -42,7 +42,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: Containerfile.base
+          file: Containerfile.fedora
           target: uki
           push: true
           tags: ghcr.io/${{ github.repository_owner }}/composefs-os:fedora-44-uki
@@ -53,7 +53,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: Containerfile.base
+          file: Containerfile.fedora
           target: uki-secureboot
           push: true
           tags: ghcr.io/${{ github.repository_owner }}/composefs-os:fedora-44-uki-sb
