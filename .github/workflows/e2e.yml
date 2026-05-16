@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 jobs:
-  e2e:
+  e2e-fedora:
     runs-on: ubuntu-latest
 
     steps:
@@ -24,7 +24,7 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q \
-            just qemu-system-x86 ovmf podman skopeo python3-pexpect \
+            just qemu-system-x86 ovmf podman buildah skopeo python3-pexpect \
             python3-virt-firmware
 
       - name: Set up Docker Buildx
@@ -153,7 +153,7 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q \
-            just qemu-system-x86 ovmf podman skopeo python3-pexpect \
+            just qemu-system-x86 ovmf podman buildah skopeo python3-pexpect \
             python3-virt-firmware
 
       - name: Set up Docker Buildx
