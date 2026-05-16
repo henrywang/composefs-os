@@ -22,6 +22,10 @@ jobs:
 
       - name: Install dependencies
         run: |
+          # noble's buildah 1.33 does not support COPY <<heredoc inline-file
+          # syntax; plucky has buildah 1.38+ and podman 5.x which do.
+          # crun is also pulled from plucky because podman 5.x requires a
+          # newer crun than noble provides.
           echo 'deb http://archive.ubuntu.com/ubuntu plucky main universe' \
             | sudo tee /etc/apt/sources.list.d/plucky.list
           sudo apt-get update -q
@@ -153,6 +157,10 @@ jobs:
 
       - name: Install dependencies
         run: |
+          # noble's buildah 1.33 does not support COPY <<heredoc inline-file
+          # syntax; plucky has buildah 1.38+ and podman 5.x which do.
+          # crun is also pulled from plucky because podman 5.x requires a
+          # newer crun than noble provides.
           echo 'deb http://archive.ubuntu.com/ubuntu plucky main universe' \
             | sudo tee /etc/apt/sources.list.d/plucky.list
           sudo apt-get update -q
