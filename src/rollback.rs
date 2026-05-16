@@ -65,13 +65,23 @@ fn entry_id(path: &Path) -> &str {
     path.file_stem().and_then(|s| s.to_str()).unwrap_or("")
 }
 
-const GRUBENV: &str = "/boot/grub2/grubenv";
 const EFI_LINUX_DIR: &str = "/boot/efi/EFI/Linux";
 
+fn grubenv_path() -> Option<&'static str> {
+    for p in ["/boot/grub2/grubenv", "/boot/grub/grubenv"] {
+        if Path::new(p).exists() {
+            return Some(p);
+        }
+    }
+    None
+}
+
 fn set_next_entry(id: &str) -> Result<()> {
+    let grubenv = grubenv_path()
+        .context("grubenv not found at /boot/grub2/grubenv or /boot/grub/grubenv")?;
     let next = format!("next_entry={id}");
     for cmd in &["grub2-editenv", "grub-editenv"] {
-        match Command::new(cmd).args([GRUBENV, "set", &next]).status() {
+        match Command::new(cmd).args([grubenv, "set", &next]).status() {
             Ok(status) if status.success() => return Ok(()),
             Ok(status) => bail!("{cmd}: exited {status}"),
             Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
@@ -123,7 +133,7 @@ fn set_next_entry_bootctl(id: &str) -> Result<()> {
 }
 
 fn use_systemd_boot() -> bool {
-    Path::new(EFI_LINUX_DIR).exists() && !Path::new(GRUBENV).exists()
+    Path::new(EFI_LINUX_DIR).exists() && grubenv_path().is_none()
 }
 
 pub fn run() -> Result<()> {

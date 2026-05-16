@@ -24,7 +24,7 @@ See [DESIGN.md](DESIGN.md) for rationale and architecture.
 | `ghcr.io/henrywang/composefs-os:fedora-44` | GRUB (BLS Type 1) | Working |
 | `ghcr.io/henrywang/composefs-os:fedora-44-uki` | systemd-boot + UKI (BLS Type 2) | Working |
 | `ghcr.io/henrywang/composefs-os:fedora-44-uki-sb` | systemd-boot + UKI + Secure Boot | Working |
-| Ubuntu | — | Planned |
+| Ubuntu 26.04 (build locally with `Containerfile.ubuntu`) | GRUB, UKI, UKI + Secure Boot | Working |
 | Arch Linux | — | Planned |
 
 
@@ -154,11 +154,14 @@ FROM ghcr.io/henrywang/composefs-os:fedora-44
 # Add packages
 RUN dnf install -y vim htop && dnf clean all
 
-# Bake in configuration that must survive upgrades
-RUN echo 'myhost' > /etc/hostname
+# Use COPY (not RUN echo) for /etc/hostname: buildah bind-mounts a synthetic
+# /etc/hostname into every RUN container, so writes via RUN are silently lost.
+COPY <<EOF /etc/hostname
+myhost
+EOF
 ```
 
-Use `examples/fedora/Containerfile` as a full template.
+Use `examples/fedora/Containerfile` or `examples/ubuntu/Containerfile` as full templates.
 
 ## In-System Management
 
@@ -190,7 +193,8 @@ survives upgrades. `cbootc-update.timer` (enabled in the base image) runs
 
 ```
 composefs-os/
-  Containerfile.base         Builds Fedora 44 base images (--target grub | uki | uki-secureboot)
+  Containerfile.fedora         Builds Fedora 44 base images (--target grub | uki | uki-secureboot)
+  Containerfile.ubuntu       Builds Ubuntu 26.04 base images (--target grub | uki | uki-secureboot)
   src/                       cbootc source (Rust)
   units/
     cbootc-update.service    Systemd service for automatic upgrades
@@ -198,10 +202,10 @@ composefs-os/
   examples/
     fedora/
       Containerfile          Template for derived Fedora images
+    ubuntu/
+      Containerfile          Template for derived Ubuntu 26.04 images
     arch/
       Containerfile          Arch Linux (stub — not yet functional)
-    ubuntu/
-      Containerfile          Ubuntu (stub — not yet functional)
   tests/
     e2e.py                   QEMU-based end-to-end test suite
   .github/workflows/
@@ -227,8 +231,9 @@ The last case is the same default as bootc. If you'd rather an image update win
 local copy manually after upgrading.
 
 **Tip:** for configuration that must be reproducible, bake it into the
-`Containerfile` (e.g. `RUN echo 'myhost' > /etc/hostname`) rather than editing
-the running system.
+`Containerfile` rather than editing the running system. Note that `/etc/hostname`
+requires `COPY <<EOF` instead of `RUN echo` — buildah bind-mounts a synthetic
+`/etc/hostname` into every `RUN` container so writes via `RUN` are silently lost.
 
 ### Rollback
 

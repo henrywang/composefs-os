@@ -8,6 +8,14 @@ example_image        := "composefs-os-test:latest"
 example_image_uki    := "composefs-os-uki-test:latest"
 example_image_uki_sb := "composefs-os-uki-sb-test:latest"
 
+# Ubuntu image tags
+base_image_ubuntu           := "composefs-os:ubuntu-26.04"
+base_image_ubuntu_uki       := "composefs-os:ubuntu-26.04-uki"
+base_image_ubuntu_uki_sb    := "composefs-os:ubuntu-26.04-uki-sb"
+example_image_ubuntu        := "composefs-os-ubuntu-test:latest"
+example_image_ubuntu_uki    := "composefs-os-ubuntu-uki-test:latest"
+example_image_ubuntu_uki_sb := "composefs-os-ubuntu-uki-sb-test:latest"
+
 # List available recipes
 default:
     @just --list
@@ -35,15 +43,15 @@ fmt:
 
 # Build the base GRUB image (slow — runs dnf + dracut inside the container)
 build-base:
-    podman build --network=host -t {{base_image}} --target grub -f Containerfile.base .
+    podman build --network=host -t {{base_image}} --target grub -f Containerfile.fedora .
 
 # Build the base UKI/systemd-boot image (slow)
 build-base-uki:
-    podman build --network=host -t {{base_image_uki}} --target uki -f Containerfile.base .
+    podman build --network=host -t {{base_image_uki}} --target uki -f Containerfile.fedora .
 
 # Build the base UKI + Secure Boot image (slow)
 build-base-uki-secureboot:
-    podman build --network=host -t {{base_image_uki_sb}} --target uki-secureboot -f Containerfile.base .
+    podman build --network=host -t {{base_image_uki_sb}} --target uki-secureboot -f Containerfile.fedora .
 
 # Build the example GRUB image on top of the base (fast)
 build-example base=base_image:
@@ -65,6 +73,39 @@ build-example-uki-secureboot base=base_image_uki_sb:
         --network=host \
         --build-arg BASE_IMAGE={{base}} \
         -f examples/fedora/Containerfile .
+
+# Build the Ubuntu base GRUB image
+build-base-ubuntu:
+    podman build --network=host -t {{base_image_ubuntu}} --target grub -f Containerfile.ubuntu .
+
+# Build the Ubuntu base UKI/systemd-boot image
+build-base-ubuntu-uki:
+    podman build --network=host -t {{base_image_ubuntu_uki}} --target uki -f Containerfile.ubuntu .
+
+# Build the Ubuntu base UKI + Secure Boot image
+build-base-ubuntu-uki-secureboot:
+    podman build --network=host -t {{base_image_ubuntu_uki_sb}} --target uki-secureboot -f Containerfile.ubuntu .
+
+# Build the Ubuntu example GRUB image on top of the base
+build-example-ubuntu base=base_image_ubuntu:
+    podman build -t {{example_image_ubuntu}} \
+        --network=host \
+        --build-arg BASE_IMAGE={{base}} \
+        -f examples/ubuntu/Containerfile .
+
+# Build the Ubuntu example UKI image
+build-example-ubuntu-uki base=base_image_ubuntu_uki:
+    podman build -t {{example_image_ubuntu_uki}} \
+        --network=host \
+        --build-arg BASE_IMAGE={{base}} \
+        -f examples/ubuntu/Containerfile .
+
+# Build the Ubuntu example UKI + Secure Boot image
+build-example-ubuntu-uki-secureboot base=base_image_ubuntu_uki_sb:
+    podman build -t {{example_image_ubuntu_uki_sb}} \
+        --network=host \
+        --build-arg BASE_IMAGE={{base}} \
+        -f examples/ubuntu/Containerfile .
 
 # ── Disk install ──────────────────────────────────────────────────────────────
 
@@ -159,6 +200,21 @@ ci-uki: build-base-uki (build-example-uki base_image_uki)
 ci-uki-secureboot: build-base-uki-secureboot (build-example-uki-secureboot base_image_uki_sb)
     just install-disk-uki-secureboot
     just e2e-uki-secureboot
+
+# Full Ubuntu GRUB workflow
+ci-ubuntu-grub: build-base-ubuntu (build-example-ubuntu base_image_ubuntu)
+    just install-disk {{example_image_ubuntu}} disk-ubuntu.raw 5G
+    just e2e disk-ubuntu.raw
+
+# Full Ubuntu UKI workflow
+ci-ubuntu-uki: build-base-ubuntu-uki (build-example-ubuntu-uki base_image_ubuntu_uki)
+    just install-disk-uki {{example_image_ubuntu_uki}} disk-ubuntu-uki.raw 5G
+    just e2e-uki disk-ubuntu-uki.raw
+
+# Full Ubuntu UKI + Secure Boot workflow
+ci-ubuntu-uki-secureboot: build-base-ubuntu-uki-secureboot (build-example-ubuntu-uki-secureboot base_image_ubuntu_uki_sb)
+    just install-disk-uki-secureboot {{example_image_ubuntu_uki_sb}} disk-ubuntu-uki-sb.raw 5G
+    just e2e-uki-secureboot disk-ubuntu-uki-sb.raw
 
 # ── Cleanup ───────────────────────────────────────────────────────────────────
 

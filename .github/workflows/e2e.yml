@@ -29,14 +29,14 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # Build the base image from source (covers PRs that change Containerfile.base
+      # Build the base image from source (covers PRs that change Containerfile.fedora
       # or the Rust code compiled inside it). Layer cache keeps this fast after
       # the first run.
       - name: Build base image
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: Containerfile.base
+          file: Containerfile.fedora
           target: grub
           push: false
           load: true
@@ -71,7 +71,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: Containerfile.base
+          file: Containerfile.fedora
           target: uki
           push: false
           load: true
@@ -100,7 +100,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: Containerfile.base
+          file: Containerfile.fedora
           target: uki-secureboot
           push: false
           load: true
@@ -133,4 +133,128 @@ jobs:
             disk-sb.raw
             disk-uki.raw
             disk-uki-sb.raw
+          retention-days: 1
+
+  e2e-ubuntu:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q \
+            just qemu-system-x86 ovmf podman skopeo python3-pexpect \
+            python3-virt-firmware
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Ubuntu base image (GRUB)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Containerfile.ubuntu
+          target: grub
+          push: false
+          load: true
+          tags: composefs-os:ubuntu-26.04
+          cache-from: type=gha,scope=ubuntu
+          cache-to: type=gha,mode=max,scope=ubuntu
+
+      - name: Load Ubuntu base image into podman
+        run: |
+          sudo skopeo copy \
+            docker-daemon:composefs-os:ubuntu-26.04 \
+            containers-storage:localhost/composefs-os:ubuntu-26.04
+
+      - name: Build Ubuntu test image
+        run: sudo just build-example-ubuntu localhost/composefs-os:ubuntu-26.04
+
+      - name: Install to disk image (Ubuntu GRUB)
+        run: just install-disk composefs-os-ubuntu-test:latest disk-ubuntu.raw 5G
+
+      - name: Run e2e tests (Ubuntu GRUB)
+        run: just e2e disk-ubuntu.raw
+
+      - name: Install to disk image (Ubuntu GRUB + Secure Boot)
+        run: just install-disk-secureboot composefs-os-ubuntu-test:latest disk-ubuntu-sb.raw 5G
+
+      - name: Run e2e tests (Ubuntu GRUB + Secure Boot)
+        run: just e2e-secureboot disk-ubuntu-sb.raw
+
+      - name: Build Ubuntu UKI base image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Containerfile.ubuntu
+          target: uki
+          push: false
+          load: true
+          tags: composefs-os:ubuntu-26.04-uki
+          cache-from: type=gha,scope=ubuntu
+          cache-to: type=gha,mode=max,scope=ubuntu
+
+      - name: Load Ubuntu UKI base image into podman
+        run: |
+          sudo skopeo copy \
+            docker-daemon:composefs-os:ubuntu-26.04-uki \
+            containers-storage:localhost/composefs-os:ubuntu-26.04-uki
+
+      - name: Build Ubuntu UKI test image
+        run: sudo just build-example-ubuntu-uki localhost/composefs-os:ubuntu-26.04-uki
+
+      - name: Install to disk image (Ubuntu UKI)
+        run: just install-disk-uki composefs-os-ubuntu-uki-test:latest disk-ubuntu-uki.raw 5G
+
+      - name: Run e2e tests (Ubuntu UKI)
+        run: |
+          OVMF_VARS=$(find /usr/share -name 'OVMF_VARS.fd' ! -name '*.secboot*' ! -name '*.ms.*' | head -1)
+          just e2e-uki disk-ubuntu-uki.raw "$OVMF_VARS"
+
+      - name: Build Ubuntu UKI+SB base image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Containerfile.ubuntu
+          target: uki-secureboot
+          push: false
+          load: true
+          tags: composefs-os:ubuntu-26.04-uki-sb
+          cache-from: type=gha,scope=ubuntu
+          cache-to: type=gha,mode=max,scope=ubuntu
+
+      - name: Load Ubuntu UKI+SB base image into podman
+        run: |
+          sudo skopeo copy \
+            docker-daemon:composefs-os:ubuntu-26.04-uki-sb \
+            containers-storage:localhost/composefs-os:ubuntu-26.04-uki-sb
+
+      - name: Build Ubuntu UKI+SB test image
+        run: sudo just build-example-ubuntu-uki-secureboot localhost/composefs-os:ubuntu-26.04-uki-sb
+
+      - name: Install to disk image (Ubuntu UKI+SB)
+        run: just install-disk-uki-secureboot composefs-os-ubuntu-uki-sb-test:latest disk-ubuntu-uki-sb.raw 5G
+
+      - name: Run e2e tests (Ubuntu UKI+SB)
+        run: just e2e-uki-secureboot disk-ubuntu-uki-sb.raw
+
+      - name: Upload Ubuntu disk images on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: disk-ubuntu-raw
+          path: |
+            disk-ubuntu.raw
+            disk-ubuntu-sb.raw
+            disk-ubuntu-uki.raw
+            disk-ubuntu-uki-sb.raw
           retention-days: 1
