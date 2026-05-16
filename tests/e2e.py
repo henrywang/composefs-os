@@ -190,10 +190,13 @@ def boot(disk_image, ovmf_code, ovmf_vars=None):
 
 
 def boot_with_network(disk_image, ovmf_code, ovmf_vars=None):
-    """Boot with virtio-net user networking; disk is writable (no snapshot=on).
+    """Boot with TAP networking and a snapshot overlay.
 
-    Omits -no-reboot so the VM can reboot within a single QEMU session,
-    enabling multi-boot upgrade/rollback test sequences.
+    snapshot=on,format=raw: QEMU creates a temporary qcow2 overlay that
+    stores only written sectors (avoids copying the full disk image into /tmp).
+    The overlay persists across guest reboots within the same QEMU process,
+    so Boot 1 writes are visible in Boot 2 and Boot 3.
+    Omits -no-reboot so the VM can reboot within a single QEMU session.
     """
     if ovmf_vars:
         machine = "-machine q35,smm=on -global driver=cfi.pflash01,property=secure,value=on"
@@ -207,7 +210,7 @@ def boot_with_network(disk_image, ovmf_code, ovmf_vars=None):
     cmd = (
         f"qemu-system-x86_64 -enable-kvm -m 2048 "
         f"{machine} "
-        f"-drive file={disk_image},if=virtio "
+        f"-drive file={disk_image},if=virtio,snapshot=on,format=raw "
         f"{pflash} "
         f"-netdev tap,id=net0,ifname={TAP_NAME},script=no,downscript=no "
         f"-device virtio-net-pci,netdev=net0 "
@@ -482,11 +485,7 @@ def run_upgrade_sequence(disk_image, ovmf_code, registry, uki=False,
     Returns (passed, failed) counts.
     """
     setup_tap()
-    fd, disk_copy = tempfile.mkstemp(suffix=".raw")
-    os.close(fd)
     try:
-        subprocess.run(["cp", "--sparse=always", disk_image, disk_copy], check=True)
-
         passed = failed = 0
 
         def step(name, fn, *args):
@@ -499,7 +498,10 @@ def run_upgrade_sequence(disk_image, ovmf_code, registry, uki=False,
                 print(f"  FAIL  {name}: {e}")
                 failed += 1
 
-        child = boot_with_network(disk_copy, ovmf_code, ovmf_vars)
+        # boot_with_network uses snapshot=on so the original disk is never
+        # modified; the QEMU-managed qcow2 overlay persists across guest
+        # reboots within the same QEMU process.
+        child = boot_with_network(disk_image, ovmf_code, ovmf_vars)
         try:
             wait_for_shell(child)
             print("==> Boot 1 OK\n")
@@ -565,8 +567,6 @@ def run_upgrade_sequence(disk_image, ovmf_code, registry, uki=False,
         return passed, failed
     finally:
         teardown_tap()
-        if os.path.exists(disk_copy):
-            os.unlink(disk_copy)
 
 
 # ---------------------------------------------------------------------------
