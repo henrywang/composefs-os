@@ -24,7 +24,9 @@ See [DESIGN.md](DESIGN.md) for rationale and architecture.
 | `ghcr.io/henrywang/composefs-os:fedora-44` | GRUB (BLS Type 1) | Working |
 | `ghcr.io/henrywang/composefs-os:fedora-44-uki` | systemd-boot + UKI (BLS Type 2) | Working |
 | `ghcr.io/henrywang/composefs-os:fedora-44-uki-sb` | systemd-boot + UKI + Secure Boot | Working |
-| Ubuntu 26.04 (build locally with `Containerfile.ubuntu`) | GRUB, UKI, UKI + Secure Boot | Working |
+| `ghcr.io/henrywang/composefs-os:ubuntu-26.04` | GRUB (BLS Type 1) | Working |
+| `ghcr.io/henrywang/composefs-os:ubuntu-26.04-uki` | systemd-boot + UKI (BLS Type 2) | Working |
+| `ghcr.io/henrywang/composefs-os:ubuntu-26.04-uki-sb` | systemd-boot + UKI + Secure Boot | Working |
 | Arch Linux | — | Planned |
 
 
@@ -149,10 +151,13 @@ The published base images are a starting point. Add your own packages and
 configuration in a derived `Containerfile`:
 
 ```dockerfile
+# Fedora
 FROM ghcr.io/henrywang/composefs-os:fedora-44
-
-# Add packages
 RUN dnf install -y vim htop && dnf clean all
+
+# Ubuntu
+FROM ghcr.io/henrywang/composefs-os:ubuntu-26.04
+RUN apt-get install -y vim htop && apt-get clean
 
 # Use COPY (not RUN echo) for /etc/hostname: buildah bind-mounts a synthetic
 # /etc/hostname into every RUN container, so writes via RUN are silently lost.
