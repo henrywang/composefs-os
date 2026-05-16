@@ -59,3 +59,36 @@ jobs:
           tags: ghcr.io/${{ github.repository_owner }}/composefs-os:fedora-44-uki-sb
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Build and push composefs-os:ubuntu-26.04 (GRUB)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Containerfile.ubuntu
+          target: grub
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/composefs-os:ubuntu-26.04
+          cache-from: type=gha,scope=ubuntu
+          cache-to: type=gha,mode=max,scope=ubuntu
+
+      - name: Build and push composefs-os:ubuntu-26.04-uki (systemd-boot + UKI)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Containerfile.ubuntu
+          target: uki
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/composefs-os:ubuntu-26.04-uki
+          cache-from: type=gha,scope=ubuntu
+          cache-to: type=gha,mode=max,scope=ubuntu
+
+      - name: Build and push composefs-os:ubuntu-26.04-uki-sb (systemd-boot + UKI + Secure Boot)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Containerfile.ubuntu
+          target: uki-secureboot
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/composefs-os:ubuntu-26.04-uki-sb
+          cache-from: type=gha,scope=ubuntu
+          cache-to: type=gha,mode=max,scope=ubuntu
