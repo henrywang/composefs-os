@@ -176,6 +176,51 @@ e2e-uki-secureboot disk="disk-uki-sb.raw" ovmf_vars="":
     fi
     python3 tests/e2e.py --uki-secureboot --ovmf-vars "$vars" {{disk}}
 
+# ── Upgrade / Switch / Rollback e2e tests ────────────────────────────────────
+
+# Run upgrade/switch/rollback e2e against a GRUB disk image (requires sudo for podman)
+e2e-upgrade image=example_image disk="disk.raw":
+    sudo python3 tests/e2e.py --upgrade --source-image {{image}} {{disk}}
+
+# Run upgrade/switch/rollback e2e against a GRUB + Secure Boot disk image
+e2e-upgrade-secureboot image=example_image disk="disk-sb.raw":
+    sudo python3 tests/e2e.py --upgrade --secure-boot --source-image {{image}} {{disk}}
+
+# Run upgrade/switch/rollback e2e against a UKI/systemd-boot disk image
+e2e-uki-upgrade image=example_image_uki disk="disk-uki.raw" ovmf_vars="":
+    v="{{ovmf_vars}}"; sudo python3 tests/e2e.py --upgrade --uki --source-image {{image}} ${v:+--ovmf-vars "$v"} {{disk}}
+
+# Run upgrade/switch/rollback e2e against a UKI + Secure Boot disk image
+e2e-uki-upgrade-secureboot image=example_image_uki_sb disk="disk-uki-sb.raw" ovmf_vars="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    vars="{{ovmf_vars}}"
+    if [ -z "$vars" ]; then
+        just prep-sb-vars {{disk}} ovmf-vars-uki-sb.fd
+        vars=ovmf-vars-uki-sb.fd
+    fi
+    sudo python3 tests/e2e.py --upgrade --uki-secureboot --source-image {{image}} --ovmf-vars "$vars" {{disk}}
+
+# Ubuntu upgrade variants
+e2e-upgrade-ubuntu image=example_image_ubuntu disk="disk-ubuntu.raw":
+    sudo python3 tests/e2e.py --upgrade --source-image {{image}} {{disk}}
+
+e2e-upgrade-secureboot-ubuntu image=example_image_ubuntu disk="disk-ubuntu-sb.raw":
+    sudo python3 tests/e2e.py --upgrade --secure-boot --source-image {{image}} {{disk}}
+
+e2e-uki-upgrade-ubuntu image=example_image_ubuntu_uki disk="disk-ubuntu-uki.raw" ovmf_vars="":
+    v="{{ovmf_vars}}"; sudo python3 tests/e2e.py --upgrade --uki --source-image {{image}} ${v:+--ovmf-vars "$v"} {{disk}}
+
+e2e-uki-upgrade-secureboot-ubuntu image=example_image_ubuntu_uki_sb disk="disk-ubuntu-uki-sb.raw" ovmf_vars="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    vars="{{ovmf_vars}}"
+    if [ -z "$vars" ]; then
+        just prep-sb-vars {{disk}} ovmf-vars-ubuntu-uki-sb.fd
+        vars=ovmf-vars-ubuntu-uki-sb.fd
+    fi
+    sudo python3 tests/e2e.py --upgrade --uki-secureboot --source-image {{image}} --ovmf-vars "$vars" {{disk}}
+
 # ── Convenience combos ────────────────────────────────────────────────────────
 
 # Rust checks only — fast, no containers needed
@@ -215,6 +260,16 @@ ci-ubuntu-uki: build-base-ubuntu-uki (build-example-ubuntu-uki base_image_ubuntu
 ci-ubuntu-uki-secureboot: build-base-ubuntu-uki-secureboot (build-example-ubuntu-uki-secureboot base_image_ubuntu_uki_sb)
     just install-disk-uki-secureboot {{example_image_ubuntu_uki_sb}} disk-ubuntu-uki-sb.raw 5G
     just e2e-uki-secureboot disk-ubuntu-uki-sb.raw
+
+# Full GRUB upgrade/switch/rollback workflow (Fedora)
+ci-grub-upgrade: build-base (build-example base_image)
+    just install-disk
+    just e2e-upgrade
+
+# Full UKI upgrade/switch/rollback workflow (Fedora)
+ci-uki-upgrade: build-base-uki (build-example-uki base_image_uki)
+    just install-disk-uki
+    just e2e-uki-upgrade
 
 # ── Cleanup ───────────────────────────────────────────────────────────────────
 

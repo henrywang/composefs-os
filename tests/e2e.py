@@ -19,13 +19,27 @@ import argparse
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
+import time
 import pexpect
 
 PROMPT = r"(?:\[root@[^\]]+\]#|root@[^:]+:[^#]*#)"
 TIMEOUT_BOOT = 180
 TIMEOUT_CMD = 30
+TIMEOUT_UPGRADE = 300  # image pull over loopback can be slow for large OS images
+
+REGISTRY_PORT = 5000
+
+# TAP-based networking gives reliable guest→host connectivity.
+# QEMU SLIRP (user-mode) does not forward guest TCP to host services on
+# arbitrary ports, so we create a TAP interface instead.
+TAP_NAME = "cbootc-test-tap"
+TAP_HOST_IP = "192.168.200.1"   # assigned to the TAP on the host
+TAP_GUEST_IP = "192.168.200.2"  # set statically inside the VM
+TAP_CIDR = "24"
+REGISTRY_HOST = TAP_HOST_IP
 
 OVMF_CANDIDATES = [
     "/usr/share/edk2/ovmf/OVMF_CODE.fd",       # Fedora
@@ -60,6 +74,97 @@ def find_ovmf_secboot():
     return code, vars_
 
 
+class LocalRegistry:
+    """Starts a local OCI registry and pushes a v2 test image into it."""
+
+    def __init__(self, source_image, port=REGISTRY_PORT):
+        self.port = port
+        self.container_name = "cbootc-test-registry"
+        self.source_image = source_image
+        self.image_ref = f"localhost:{port}/test-image:latest"
+
+    def __enter__(self):
+        dockerfile = (
+            f"FROM {self.source_image}\n"
+            "RUN echo v2 > /usr/lib/cbootc-test-version\n"
+        )
+        subprocess.run(
+            ["podman", "build", "-t", "cbootc-test-v2:latest", "-f", "-", "."],
+            input=dockerfile.encode(),
+            check=True,
+        )
+        subprocess.run(
+            ["podman", "rm", "-f", self.container_name],
+            check=False,
+            capture_output=True,
+        )
+        # --network=host: registry binds directly to 0.0.0.0:5000 in the host
+        # network namespace — no container NAT or FORWARD rules needed.
+        subprocess.run(
+            [
+                "podman", "run", "-d", "--rm",
+                "--network=host",
+                "--name", self.container_name,
+                "-e", f"REGISTRY_HTTP_ADDR=0.0.0.0:{self.port}",
+                "docker.io/library/registry:2",
+            ],
+            check=True,
+        )
+        time.sleep(2)
+        subprocess.run(
+            [
+                "skopeo", "copy",
+                "--dest-tls-verify=false",
+                "containers-storage:localhost/cbootc-test-v2:latest",
+                f"docker://{self.image_ref}",
+            ],
+            check=True,
+        )
+        return self
+
+    def __exit__(self, *_):
+        subprocess.run(
+            ["podman", "stop", self.container_name],
+            check=False,
+            capture_output=True,
+        )
+
+
+def setup_tap():
+    """Create a TAP interface on the host for VM networking (requires root)."""
+    # Clean up any leftover interface from a previous failed run.
+    subprocess.run(
+        ["ip", "tuntap", "del", TAP_NAME, "mode", "tap"],
+        check=False, capture_output=True,
+    )
+    subprocess.run(["ip", "tuntap", "add", TAP_NAME, "mode", "tap"], check=True)
+    subprocess.run(
+        ["ip", "addr", "add", f"{TAP_HOST_IP}/{TAP_CIDR}", "dev", TAP_NAME],
+        check=True,
+    )
+    subprocess.run(["ip", "link", "set", TAP_NAME, "up"], check=True)
+    # Allow all traffic from the TAP interface through the host firewall so the
+    # VM can reach the local registry. Without this, iptables INPUT DROP policy
+    # silently rejects TCP connections even though ICMP (ping) passes.
+    subprocess.run(
+        ["iptables", "-I", "INPUT", "1", "-i", TAP_NAME, "-j", "ACCEPT"],
+        check=False, capture_output=True,
+    )
+
+
+def teardown_tap():
+    """Remove the TAP interface."""
+    subprocess.run(
+        ["iptables", "-D", "INPUT", "-i", TAP_NAME, "-j", "ACCEPT"],
+        check=False, capture_output=True,
+    )
+    subprocess.run(["ip", "link", "set", TAP_NAME, "down"], check=False, capture_output=True)
+    subprocess.run(
+        ["ip", "tuntap", "del", TAP_NAME, "mode", "tap"],
+        check=False, capture_output=True,
+    )
+
+
 def boot(disk_image, ovmf_code, ovmf_vars=None):
     if ovmf_vars:
         # Secure Boot OVMF requires q35 + SMM for the firmware's variable-locking
@@ -84,18 +189,63 @@ def boot(disk_image, ovmf_code, ovmf_vars=None):
     return child
 
 
+def boot_with_network(disk_image, ovmf_code, ovmf_vars=None):
+    """Boot with virtio-net user networking; disk is writable (no snapshot=on).
+
+    Omits -no-reboot so the VM can reboot within a single QEMU session,
+    enabling multi-boot upgrade/rollback test sequences.
+    """
+    if ovmf_vars:
+        machine = "-machine q35,smm=on -global driver=cfi.pflash01,property=secure,value=on"
+        pflash = (
+            f"-drive if=pflash,format=raw,readonly=on,file={ovmf_code} "
+            f"-drive if=pflash,format=raw,file={ovmf_vars}"
+        )
+    else:
+        machine = ""
+        pflash = f"-drive if=pflash,format=raw,readonly=on,file={ovmf_code}"
+    cmd = (
+        f"qemu-system-x86_64 -enable-kvm -m 2048 "
+        f"{machine} "
+        f"-drive file={disk_image},if=virtio "
+        f"{pflash} "
+        f"-netdev tap,id=net0,ifname={TAP_NAME},script=no,downscript=no "
+        f"-device virtio-net-pci,netdev=net0 "
+        f"-nographic"
+    )
+    child = pexpect.spawn(cmd, timeout=TIMEOUT_BOOT, encoding="utf-8")
+    child.logfile_read = sys.stdout
+    return child
+
+
 def wait_for_shell(child):
     child.expect(PROMPT, timeout=TIMEOUT_BOOT)
 
 
-def run_cmd(child, cmd):
+def reboot_and_wait_for_shell(child):
+    """Send 'systemctl reboot' and wait for the next boot's shell prompt.
+
+    'systemctl reboot' returns to the shell briefly before the reboot
+    actually starts, causing the shell to emit a spurious prompt.
+    We skip it by waiting for an early BIOS/kernel marker — which only
+    appears during a fresh boot — before looking for the shell prompt.
+    """
+    child.sendline("systemctl reboot")
+    # "BdsDxe:" is the OVMF/UEFI firmware pre-boot message.
+    # "Booting paravirtualized kernel" appears early in the Linux kernel log.
+    # Either marker confirms we are past the stale Boot-N shell prompt.
+    child.expect(r"BdsDxe:|Booting paravirtualized kernel", timeout=TIMEOUT_BOOT)
+    wait_for_shell(child)
+
+
+def run_cmd(child, cmd, timeout=TIMEOUT_CMD):
     """Run a shell command; return (exit_code, output_before_exit_marker)."""
     marker = "__E2E_EXIT__"
     child.sendline(f"{cmd}; echo {marker}$?")
-    child.expect(rf"{marker}(\d+)", timeout=TIMEOUT_CMD)
+    child.expect(rf"{marker}(\d+)", timeout=timeout)
     exit_code = int(child.match.group(1))
     output = child.before
-    child.expect(PROMPT, timeout=TIMEOUT_CMD)
+    child.expect(PROMPT, timeout=timeout)
     return exit_code, output
 
 
@@ -171,6 +321,220 @@ def test_var_config(child):
 
 
 # ---------------------------------------------------------------------------
+# Upgrade / switch / rollback helpers
+# ---------------------------------------------------------------------------
+
+def get_current_digest(child):
+    """Extract the composefs digest from /proc/cmdline (strips leading '?')."""
+    rc, out = run_cmd(child, "cat /proc/cmdline")
+    assert rc == 0, "could not read /proc/cmdline"
+    m = re.search(r"composefs=\??(\S+)", out)
+    assert m, f"No composefs= token in /proc/cmdline:\n{out}"
+    return m.group(1)
+
+
+def configure_insecure_registry(child, port=REGISTRY_PORT):
+    """Write a registries.conf.d drop-in allowing plain HTTP to the test registry."""
+    rc, out = run_cmd(
+        child,
+        "mkdir -p /etc/containers/registries.conf.d && "
+        "{ "
+        'echo "[[registry]]"; '
+        f'echo \'location = "{REGISTRY_HOST}:{port}"\'; '
+        'echo "insecure = true"; '
+        "} > /etc/containers/registries.conf.d/local-test.conf",
+    )
+    assert rc == 0, f"failed to configure insecure registry:\n{out}"
+
+
+def configure_guest_network(child):
+    """Assign a static IP to the first non-loopback interface (TAP network)."""
+    rc, out = run_cmd(
+        child,
+        "iface=$(ip -br link show | awk '!/^lo/{print $1}' | head -1); "
+        f"ip addr add {TAP_GUEST_IP}/{TAP_CIDR} dev $iface 2>/dev/null; "
+        f"ip link set $iface up",
+    )
+    assert rc == 0, f"failed to configure guest network:\n{out}"
+
+
+def wait_for_network(child):
+    """Verify the host is reachable via the TAP interface."""
+    rc, _ = run_cmd(child, f"ping -c1 -W3 {TAP_HOST_IP}", timeout=10)
+    assert rc == 0, f"Host {TAP_HOST_IP} not reachable after network configuration"
+
+
+def test_switch(child, image_ref):
+    """cbootc switch must exit 0 and pull the new image."""
+    rc, out = run_cmd(child, f"cbootc switch {image_ref}", timeout=TIMEOUT_UPGRADE)
+    assert rc == 0, f"cbootc switch failed:\n{out}"
+
+
+def test_new_grub_entry_created(child):
+    """Two or more BLS entries must exist after upgrade."""
+    rc, out = run_cmd(
+        child, "echo BLSCOUNT:$(ls /boot/loader/entries/*.conf 2>/dev/null | wc -l)"
+    )
+    assert rc == 0, "could not count BLS entries"
+    m = re.search(r"BLSCOUNT:(\d+)", out)
+    assert m, f"could not parse BLS count from output:\n{out!r}"
+    count = int(m.group(1))
+    assert count >= 2, f"expected ≥2 BLS entries after upgrade, got {count}"
+
+
+def test_new_uki_entry_created(child):
+    """Two or more UKI .efi files must exist after upgrade."""
+    rc, out = run_cmd(
+        child, "echo UKICOUNT:$(ls /boot/efi/EFI/Linux/*.efi 2>/dev/null | wc -l)"
+    )
+    assert rc == 0, "could not count UKI entries"
+    m = re.search(r"UKICOUNT:(\d+)", out)
+    assert m, f"could not parse UKI count from output:\n{out!r}"
+    count = int(m.group(1))
+    assert count >= 2, f"expected ≥2 UKI entries after upgrade, got {count}"
+
+
+def test_upgraded_digest_active(child, previous_digest):
+    """After reboot, /proc/cmdline must show a different digest."""
+    current = get_current_digest(child)
+    assert current != previous_digest, (
+        f"Digest unchanged after upgrade reboot: {current!r} "
+        "(system may have booted the old entry)"
+    )
+
+
+def test_rollback_succeeds(child):
+    """cbootc rollback must exit 0 when a previous deployment exists."""
+    rc, out = run_cmd(child, "cbootc rollback")
+    assert rc == 0, f"cbootc rollback failed unexpectedly:\n{out}"
+
+
+def test_grubenv_next_entry_set(child):
+    """After rollback, grubenv must have a non-empty next_entry."""
+    rc, out = run_cmd(
+        child,
+        "grub2-editenv /boot/grub2/grubenv list 2>/dev/null || "
+        "grub-editenv /boot/grub/grubenv list 2>/dev/null",
+    )
+    assert rc == 0, "grubenv not readable after rollback"
+    assert re.search(r"next_entry=\S+", out), (
+        f"next_entry not set in grubenv:\n{out!r}"
+    )
+
+
+def test_bootctl_next_entry_set(child):
+    """After rollback, the LoaderEntryOneShot EFI variable must be present."""
+    efivar_guid = "4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"
+    rc, _ = run_cmd(
+        child,
+        f"test -e /sys/firmware/efi/efivars/LoaderEntryOneShot-{efivar_guid}",
+    )
+    assert rc == 0, "LoaderEntryOneShot EFI variable not set after cbootc rollback"
+
+
+def test_rolled_back_digest_active(child, expected_digest):
+    """After rollback reboot, /proc/cmdline must show the original digest."""
+    current = get_current_digest(child)
+    assert current == expected_digest, (
+        f"Expected original digest {expected_digest!r} after rollback, got {current!r}"
+    )
+
+
+def run_upgrade_sequence(disk_image, ovmf_code, registry, uki=False,
+                         secure_boot=False, ovmf_vars=None):
+    """Three-boot upgrade → rollback sequence on a sparse copy of disk_image.
+
+    Boot 1: configure insecure registry, cbootc switch to v2, verify new entry,
+            optionally verify Secure Boot still active, then reboot.
+    Boot 2: verify new digest is active, cbootc rollback, verify next-boot
+            selection set, optionally verify Secure Boot still active, then reboot.
+    Boot 3: verify original digest is active, optionally verify Secure Boot.
+
+    Returns (passed, failed) counts.
+    """
+    setup_tap()
+    fd, disk_copy = tempfile.mkstemp(suffix=".raw")
+    os.close(fd)
+    try:
+        subprocess.run(["cp", "--sparse=always", disk_image, disk_copy], check=True)
+
+        passed = failed = 0
+
+        def step(name, fn, *args):
+            nonlocal passed, failed
+            try:
+                fn(*args)
+                print(f"  PASS  {name}")
+                passed += 1
+            except AssertionError as e:
+                print(f"  FAIL  {name}: {e}")
+                failed += 1
+
+        child = boot_with_network(disk_copy, ovmf_code, ovmf_vars)
+        try:
+            wait_for_shell(child)
+            print("==> Boot 1 OK\n")
+
+            original_digest = get_current_digest(child)
+
+            step("configure_insecure_registry", configure_insecure_registry, child)
+            step("configure_guest_network", configure_guest_network, child)
+            step("wait_for_network", wait_for_network, child)
+
+            image_ref = (
+                f"docker://{REGISTRY_HOST}:{registry.port}/test-image:latest"
+            )
+            step("switch_to_v2", test_switch, child, image_ref)
+
+            if uki:
+                step("new_uki_entry_created", test_new_uki_entry_created, child)
+            else:
+                step("new_grub_entry_created", test_new_grub_entry_created, child)
+
+            if secure_boot:
+                step("secure_boot_enabled_boot1", test_secure_boot_enabled, child)
+
+            reboot_and_wait_for_shell(child)
+            print("\n==> Boot 2 OK\n")
+
+            step("upgraded_digest_active",
+                 test_upgraded_digest_active, child, original_digest)
+
+            if secure_boot:
+                step("secure_boot_enabled_boot2", test_secure_boot_enabled, child)
+
+            step("rollback_succeeds", test_rollback_succeeds, child)
+
+            if uki:
+                step("bootctl_next_entry_set", test_bootctl_next_entry_set, child)
+            else:
+                step("grubenv_next_entry_set", test_grubenv_next_entry_set, child)
+
+            reboot_and_wait_for_shell(child)
+            print("\n==> Boot 3 OK\n")
+
+            step("rolled_back_digest_active",
+                 test_rolled_back_digest_active, child, original_digest)
+
+            if secure_boot:
+                step("secure_boot_enabled_boot3", test_secure_boot_enabled, child)
+
+        except pexpect.TIMEOUT:
+            print("\nFAIL: timed out waiting for output")
+            print("Last output:", child.before)
+            failed += 1
+        finally:
+            child.sendline("poweroff -f")
+            child.expect(pexpect.EOF, timeout=30)
+
+        return passed, failed
+    finally:
+        teardown_tap()
+        if os.path.exists(disk_copy):
+            os.unlink(disk_copy)
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 
@@ -210,6 +574,19 @@ def main():
         "--uki-secureboot",
         action="store_true",
         help="Test a UKI + Secure Boot disk image (requires secboot OVMF with cert enrolled in db)",
+    )
+    parser.add_argument(
+        "--upgrade",
+        action="store_true",
+        help=(
+            "Run a 3-boot upgrade/switch/rollback sequence instead of static "
+            "post-install tests. Requires --source-image and a running podman daemon."
+        ),
+    )
+    parser.add_argument(
+        "--source-image",
+        metavar="IMAGE",
+        help="Local podman image to build the v2 upgrade image from (required with --upgrade)",
     )
     args = parser.parse_args()
 
@@ -263,6 +640,20 @@ def main():
                 print("ERROR: OVMF firmware not found. Install edk2-ovmf or pass --ovmf.")
                 sys.exit(1)
             tests = GRUB_TESTS
+
+        if args.upgrade:
+            if not args.source_image:
+                print("ERROR: --source-image is required with --upgrade")
+                sys.exit(1)
+            uki = args.uki or args.uki_secureboot
+            secure_boot = args.secure_boot or args.uki_secureboot
+            with LocalRegistry(args.source_image) as registry:
+                passed, failed = run_upgrade_sequence(
+                    args.disk_image, ovmf_code, registry,
+                    uki=uki, secure_boot=secure_boot, ovmf_vars=ovmf_vars_tmp,
+                )
+            print(f"\n{passed} passed, {failed} failed")
+            sys.exit(0 if failed == 0 else 1)
 
         print(f"Booting {args.disk_image} ...")
         child = boot(args.disk_image, ovmf_code, ovmf_vars_tmp)

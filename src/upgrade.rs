@@ -190,8 +190,9 @@ pub fn patch_bls_entry(bootdir: &Path, digest: &str, image_ref: &str) -> Result<
 /// `bootdir/loader/entries/`.  Used on distros (Ubuntu/Debian) that do not
 /// ship `blscfg.mod` in their GRUB package.
 ///
-/// Each entry gets `--id <digest>` so that rollback's `next_entry=<digest>`
-/// in grubenv correctly selects the previous deployment.
+/// Entries are sorted newest-first; index 0 is the default boot entry.
+/// rollback.rs writes `next_entry=<numeric-index>` (not the digest) for
+/// Ubuntu because GRUB does not reliably match long --id values.
 pub fn write_grub_menuentry_cfg(bootdir: &Path, grub_subdir: &str) -> Result<()> {
     let entries_dir = bootdir.join("loader/entries");
     let mut bls: Vec<(std::time::SystemTime, String, String, String)> = Vec::new();
