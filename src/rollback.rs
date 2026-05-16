@@ -77,8 +77,8 @@ fn grubenv_path() -> Option<&'static str> {
 }
 
 fn set_next_entry(id: &str) -> Result<()> {
-    let grubenv = grubenv_path()
-        .context("grubenv not found at /boot/grub2/grubenv or /boot/grub/grubenv")?;
+    let grubenv =
+        grubenv_path().context("grubenv not found at /boot/grub2/grubenv or /boot/grub/grubenv")?;
     let next = format!("next_entry={id}");
     for cmd in &["grub2-editenv", "grub-editenv"] {
         match Command::new(cmd).args([grubenv, "set", &next]).status() {

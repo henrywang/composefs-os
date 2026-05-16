@@ -207,8 +207,8 @@ pub fn write_grub_menuentry_cfg(bootdir: &Path, grub_subdir: &str) -> Result<()>
                 .metadata()
                 .and_then(|m| m.modified())
                 .unwrap_or(std::time::UNIX_EPOCH);
-            let content = fs::read_to_string(&path)
-                .with_context(|| format!("reading {}", path.display()))?;
+            let content =
+                fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
             let digest = path
                 .file_stem()
                 .and_then(|s| s.to_str())
@@ -258,8 +258,7 @@ pub fn write_grub_menuentry_cfg(bootdir: &Path, grub_subdir: &str) -> Result<()>
     }
 
     let cfg_path = grub_boot_dir.join("grub.cfg");
-    fs::write(&cfg_path, &cfg)
-        .with_context(|| format!("writing {}", cfg_path.display()))
+    fs::write(&cfg_path, &cfg).with_context(|| format!("writing {}", cfg_path.display()))
 }
 
 /// Read the running kernel cmdline, stripping the composefs= token so
