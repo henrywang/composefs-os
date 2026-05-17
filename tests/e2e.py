@@ -143,21 +143,33 @@ def setup_tap():
         check=True,
     )
     subprocess.run(["ip", "link", "set", TAP_NAME, "up"], check=True)
-    # Put the TAP in the trusted zone so the host firewall permits all traffic
-    # from the VM. Fedora uses nftables via firewalld; iptables rules are silently
-    # ignored on nftables backends, so firewall-cmd is the correct tool here.
-    subprocess.run(
-        ["firewall-cmd", "--zone=trusted", f"--change-interface={TAP_NAME}"],
-        check=False, capture_output=True,
-    )
+    # Open the TAP in the host firewall so the VM can reach the local registry.
+    # Prefer firewall-cmd (Fedora/RHEL — nftables backend ignores plain iptables
+    # rules); fall back to iptables on systems without firewalld (Ubuntu/CI).
+    try:
+        subprocess.run(
+            ["firewall-cmd", "--zone=trusted", f"--change-interface={TAP_NAME}"],
+            check=False, capture_output=True,
+        )
+    except FileNotFoundError:
+        subprocess.run(
+            ["iptables", "-I", "INPUT", "1", "-i", TAP_NAME, "-j", "ACCEPT"],
+            check=False, capture_output=True,
+        )
 
 
 def teardown_tap():
     """Remove the TAP interface."""
-    subprocess.run(
-        ["firewall-cmd", "--zone=trusted", f"--remove-interface={TAP_NAME}"],
-        check=False, capture_output=True,
-    )
+    try:
+        subprocess.run(
+            ["firewall-cmd", "--zone=trusted", f"--remove-interface={TAP_NAME}"],
+            check=False, capture_output=True,
+        )
+    except FileNotFoundError:
+        subprocess.run(
+            ["iptables", "-D", "INPUT", "-i", TAP_NAME, "-j", "ACCEPT"],
+            check=False, capture_output=True,
+        )
     subprocess.run(["ip", "link", "set", TAP_NAME, "down"], check=False, capture_output=True)
     subprocess.run(
         ["ip", "tuntap", "del", TAP_NAME, "mode", "tap"],
