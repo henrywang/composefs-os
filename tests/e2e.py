@@ -442,7 +442,10 @@ def test_loader_conf_default_set(child):
     """After rollback, /boot/efi/loader/loader.conf must have a 'default' entry."""
     rc, out = run_cmd(child, "cat /boot/efi/loader/loader.conf 2>/dev/null || true")
     assert rc == 0, "could not read loader.conf"
-    assert re.search(r"^default\s+\S", out, re.MULTILINE), (
+    # Use \b instead of ^ — Ubuntu's bash emits OSC shell-integration sequences
+    # (e.g. \x1b]3008;...\x1b\\) immediately before command output, which are
+    # not newlines, so re.MULTILINE ^ never matches at that position.
+    assert re.search(r"\bdefault\s+\S", out), (
         f"no 'default' line in /boot/efi/loader/loader.conf:\n{out!r}"
     )
 
