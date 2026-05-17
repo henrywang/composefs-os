@@ -438,14 +438,13 @@ def test_grubenv_next_entry_set(child):
     )
 
 
-def test_bootctl_next_entry_set(child):
-    """After rollback, the LoaderEntryOneShot EFI variable must be present."""
-    efivar_guid = "4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"
-    rc, _ = run_cmd(
-        child,
-        f"test -e /sys/firmware/efi/efivars/LoaderEntryOneShot-{efivar_guid}",
+def test_loader_conf_default_set(child):
+    """After rollback, /boot/efi/loader/loader.conf must have a 'default' entry."""
+    rc, out = run_cmd(child, "cat /boot/efi/loader/loader.conf 2>/dev/null || true")
+    assert rc == 0, "could not read loader.conf"
+    assert re.search(r"^default\s+\S", out, re.MULTILINE), (
+        f"no 'default' line in /boot/efi/loader/loader.conf:\n{out!r}"
     )
-    assert rc == 0, "LoaderEntryOneShot EFI variable not set after cbootc rollback"
 
 
 def test_rolled_back_digest_active(child, expected_digest):
@@ -454,22 +453,6 @@ def test_rolled_back_digest_active(child, expected_digest):
     assert current == expected_digest, (
         f"Expected original digest {expected_digest!r} after rollback, got {current!r}"
     )
-
-
-def _diag(child, label):
-    """Run diagnostic commands for debugging; never raises."""
-    print(f"\n--- DIAG: {label} ---")
-    for cmd in [
-        "which bootctl 2>&1 || echo 'bootctl not found'",
-        "bootctl --version 2>&1 | head -1 || true",
-        "mount | grep -E 'boot|efi' || echo 'no boot/efi mounts'",
-        "ls /boot/efi/EFI/Linux/ 2>&1 || echo 'EFI/Linux not accessible'",
-        "ls /sys/firmware/efi/efivars/ 2>&1 | wc -l || echo 'no efivars'",
-        "bootctl status 2>&1 | head -20 || true",
-    ]:
-        _, out = run_cmd(child, cmd)
-        print(out.strip())
-    print(f"--- END DIAG: {label} ---\n")
 
 
 def run_upgrade_sequence(disk_image, ovmf_code, registry, uki=False,
@@ -512,9 +495,6 @@ def run_upgrade_sequence(disk_image, ovmf_code, registry, uki=False,
             step("configure_guest_network", configure_guest_network, child)
             step("wait_for_network", wait_for_network, child)
 
-            if uki:
-                _diag(child, "before switch_to_v2 (UKI)")
-
             image_ref = (
                 f"docker://{REGISTRY_HOST}:{registry.port}/test-image:latest"
             )
@@ -537,13 +517,10 @@ def run_upgrade_sequence(disk_image, ovmf_code, registry, uki=False,
             if secure_boot:
                 step("secure_boot_enabled_boot2", test_secure_boot_enabled, child)
 
-            if uki:
-                _diag(child, "before rollback_succeeds (UKI Boot 2)")
-
             step("rollback_succeeds", test_rollback_succeeds, child)
 
             if uki:
-                step("bootctl_next_entry_set", test_bootctl_next_entry_set, child)
+                step("loader_conf_default_set", test_loader_conf_default_set, child)
             else:
                 step("grubenv_next_entry_set", test_grubenv_next_entry_set, child)
 

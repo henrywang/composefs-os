@@ -5,6 +5,36 @@ use std::{fs, os::unix::fs::symlink, path::Path, path::PathBuf, process::Command
 
 use crate::{cfsctl, config, signing};
 
+/// Write (or update) the `default <entry_id>` line in
+/// `<esp>/loader/loader.conf` so systemd-boot boots `entry_id` on the next
+/// reboot.  Writing the file directly avoids any dependency on `bootctl` or a
+/// writable efivarfs — both of which may be absent in container/VM contexts.
+pub(crate) fn set_loader_conf_default(esp: &Path, entry_id: &str) -> Result<()> {
+    let conf = esp.join("loader/loader.conf");
+    fs::create_dir_all(conf.parent().unwrap()).context("creating loader dir")?;
+    let existing = if conf.exists() {
+        fs::read_to_string(&conf).with_context(|| format!("reading {}", conf.display()))?
+    } else {
+        String::new()
+    };
+    let mut replaced = false;
+    let mut lines: Vec<String> = existing
+        .lines()
+        .map(|l| {
+            if l.starts_with("default ") || l == "default" {
+                replaced = true;
+                format!("default {entry_id}")
+            } else {
+                l.to_owned()
+            }
+        })
+        .collect();
+    if !replaced {
+        lines.push(format!("default {entry_id}"));
+    }
+    fs::write(&conf, lines.join("\n") + "\n").with_context(|| format!("writing {}", conf.display()))
+}
+
 const EFI_ESP: &str = "/boot/efi";
 // UKIs live on the ESP, not XBOOTLDR — systemd-boot always scans its own partition.
 const EFI_LINUX_DIR: &str = "/boot/efi/EFI/Linux";
@@ -65,6 +95,11 @@ pub fn run(reboot: bool) -> Result<()> {
             println!("Signing UKI ...");
             crate::install::sign_efi(&uki_path, Path::new(&sb.key), Path::new(&sb.cert))?;
         }
+        // Make the new UKI the permanent default so systemd-boot boots it on
+        // the next reboot regardless of how the EFI/Linux/*.efi entries sort.
+        // Write loader.conf directly — does not require `bootctl` or a
+        // writable efivarfs (both may be absent in container/VM contexts).
+        set_loader_conf_default(Path::new(EFI_ESP), &digest)?;
     } else {
         patch_bls_entry(Path::new(BOOT_DIR), &digest, &image_ref)?;
         if !crate::install::has_grub2() {

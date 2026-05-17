@@ -152,17 +152,6 @@ fn load_uki_entries() -> Result<Vec<BLSEntry>> {
     Ok(entries)
 }
 
-fn set_next_entry_bootctl(id: &str) -> Result<()> {
-    let status = Command::new("bootctl")
-        .args(["set-next", id])
-        .status()
-        .context("spawning bootctl set-next")?;
-    if !status.success() {
-        bail!("bootctl set-next failed: {status}");
-    }
-    Ok(())
-}
-
 fn use_systemd_boot() -> bool {
     Path::new(EFI_LINUX_DIR).exists() && grubenv_path().is_none()
 }
@@ -190,7 +179,7 @@ pub fn run() -> Result<()> {
 
     let id = entry_id(&previous.path);
     if systemd_boot {
-        set_next_entry_bootctl(id)?;
+        crate::upgrade::set_loader_conf_default(std::path::Path::new("/boot/efi"), id)?;
     } else if crate::install::has_grub2() {
         // Fedora/RHEL: grub2's blscfg.mod reads BLS entries natively and
         // matches next_entry=<digest> against each entry's --id.
