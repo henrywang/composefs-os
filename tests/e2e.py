@@ -143,11 +143,11 @@ def setup_tap():
         check=True,
     )
     subprocess.run(["ip", "link", "set", TAP_NAME, "up"], check=True)
-    # Allow all traffic from the TAP interface through the host firewall so the
-    # VM can reach the local registry. Without this, iptables INPUT DROP policy
-    # silently rejects TCP connections even though ICMP (ping) passes.
+    # Put the TAP in the trusted zone so the host firewall permits all traffic
+    # from the VM. Fedora uses nftables via firewalld; iptables rules are silently
+    # ignored on nftables backends, so firewall-cmd is the correct tool here.
     subprocess.run(
-        ["iptables", "-I", "INPUT", "1", "-i", TAP_NAME, "-j", "ACCEPT"],
+        ["firewall-cmd", "--zone=trusted", f"--change-interface={TAP_NAME}"],
         check=False, capture_output=True,
     )
 
@@ -155,7 +155,7 @@ def setup_tap():
 def teardown_tap():
     """Remove the TAP interface."""
     subprocess.run(
-        ["iptables", "-D", "INPUT", "-i", TAP_NAME, "-j", "ACCEPT"],
+        ["firewall-cmd", "--zone=trusted", f"--remove-interface={TAP_NAME}"],
         check=False, capture_output=True,
     )
     subprocess.run(["ip", "link", "set", TAP_NAME, "down"], check=False, capture_output=True)
@@ -354,22 +354,22 @@ def configure_guest_network(child):
     """Assign a static IP to the first non-loopback interface (TAP network)."""
     rc, out = run_cmd(
         child,
-        # Wait up to 15 s for the virtio-net device to be visible.  On Fedora
-        # the autologin shell fires while udev is still renaming the interface,
-        # so the device is not immediately present in ip-link output.
-        "iface=''; "
-        "for i in $(seq 1 15); do "
+        # Re-read the interface name on every iteration: udev may rename the
+        # virtio-net device (e.g. eth0 → enp0s3) between the name lookup and
+        # ip addr add, causing ENODEV.  Retrying with a fresh lookup handles
+        # both the rename race and the case where the device isn't yet visible.
+        "ok=0; "
+        "for i in $(seq 1 30); do "
         "  iface=$(ip -br link show | awk '!/^lo/{print $1}' | head -1); "
-        "  [ -n \"$iface\" ] && break; sleep 1; "
+        "  [ -z \"$iface\" ] && { sleep 1; continue; }; "
+        "  nmcli dev set \"$iface\" managed no 2>/dev/null; "
+        "  ip addr flush dev \"$iface\" 2>/dev/null; "
+        f"  ip addr add {TAP_GUEST_IP}/{TAP_CIDR} dev \"$iface\" 2>/dev/null "
+        f"  && ip link set \"$iface\" up && ok=1 && break; "
+        "  sleep 1; "
         "done; "
-        # Tell NetworkManager to stop managing this interface so it cannot
-        # override the static IP we are about to assign.
-        "nmcli dev set \"$iface\" managed no 2>/dev/null; "
-        # Flush any NM-assigned or stale addresses, then add ours.
-        f"ip addr flush dev \"$iface\" 2>/dev/null; "
-        f"ip addr add {TAP_GUEST_IP}/{TAP_CIDR} dev \"$iface\"; "
-        f"ip link set \"$iface\" up",
-        timeout=20,
+        "[ $ok -eq 1 ]",
+        timeout=35,
     )
     assert rc == 0, f"failed to configure guest network:\n{out}"
 
