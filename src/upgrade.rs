@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::{fs, os::unix::fs::symlink, path::Path, path::PathBuf, process::Command};
+use std::{fs, io, os::unix::fs::symlink, path::Path, path::PathBuf, process::Command};
 
 use crate::{cfsctl, config, signing};
 
@@ -106,6 +106,11 @@ pub fn run(reboot: bool) -> Result<()> {
             // Ubuntu: regenerate menuentry-based grub.cfg so the new deployment
             // appears in the menu (blscfg.mod is not available on Ubuntu).
             write_grub_menuentry_cfg(Path::new(BOOT_DIR), crate::install::grub_dir())?;
+        } else {
+            // Fedora/RHEL: blscfg.mod reads BLS entries but selects the default
+            // based on grubenv `default`.  Without this update, GRUB continues
+            // to boot the previous entry regardless of the new BLS conf.
+            set_grub_default(&digest)?;
         }
     }
 
@@ -367,6 +372,30 @@ fn write_state(digest: &str, manifest_digest: Option<&str>) -> Result<()> {
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let json = serde_json::to_string_pretty(&state).context("serializing state")?;
     fs::write(STATE_PATH, json).with_context(|| format!("writing {STATE_PATH}"))
+}
+
+/// Set the permanent GRUB default to `entry_id` via grub2-editenv/grub-editenv.
+/// If grubenv does not exist yet, skips silently (blscfg will fall back to its
+/// own sort order).
+fn set_grub_default(entry_id: &str) -> Result<()> {
+    let Some(grubenv) = ["/boot/grub2/grubenv", "/boot/grub/grubenv"]
+        .iter()
+        .find(|p| Path::new(p).exists())
+    else {
+        return Ok(());
+    };
+    for cmd in &["grub2-editenv", "grub-editenv"] {
+        match Command::new(cmd)
+            .args([*grubenv, "set", &format!("default={entry_id}")])
+            .status()
+        {
+            Ok(s) if s.success() => return Ok(()),
+            Ok(s) => anyhow::bail!("{cmd}: exited {s}"),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e).with_context(|| format!("spawning {cmd}")),
+        }
+    }
+    anyhow::bail!("neither grub2-editenv nor grub-editenv found in PATH")
 }
 
 fn trigger_reboot() -> Result<()> {
