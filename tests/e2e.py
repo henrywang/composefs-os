@@ -316,21 +316,35 @@ def configure_insecure_registry(child, port=REGISTRY_PORT):
     assert rc == 0, f"failed to configure insecure registry:\n{out}"
 
 
+SLIRP_GUEST_IP = "10.0.2.100"   # static IP we assign inside the VM
+SLIRP_CIDR = "24"               # 10.0.2.0/24 — puts host (10.0.2.2) on same link
+
+
 def configure_guest_network(child):
-    """Wait for DHCP from QEMU SLIRP — no manual configuration needed."""
+    """Assign a static IP in the QEMU SLIRP subnet (10.0.2.0/24).
+
+    Uses a static address rather than waiting for DHCP so the test works
+    regardless of how the image's network manager is configured.  Once
+    10.0.2.100/24 is assigned, 10.0.2.2 (the SLIRP host) is reachable via
+    the automatic link-local subnet route — no explicit default route needed.
+    Re-reads the interface name on each iteration to survive udev renames.
+    """
     rc, out = run_cmd(
         child,
-        # QEMU SLIRP provides DHCP; NetworkManager handles it automatically.
-        # Wait up to 30 s for a default route to appear.
         "ok=0; "
         "for i in $(seq 1 30); do "
-        "  ip route show default | grep -q default && ok=1 && break; "
+        "  iface=$(ip -br link show | awk '!/^lo/{print $1}' | head -1); "
+        "  [ -z \"$iface\" ] && { sleep 1; continue; }; "
+        "  nmcli dev set \"$iface\" managed no 2>/dev/null; "
+        "  ip addr flush dev \"$iface\" 2>/dev/null; "
+        f"  ip addr add {SLIRP_GUEST_IP}/{SLIRP_CIDR} dev \"$iface\" 2>/dev/null "
+        f"  && ip link set \"$iface\" up && ok=1 && break; "
         "  sleep 1; "
         "done; "
         "[ $ok -eq 1 ]",
         timeout=35,
     )
-    assert rc == 0, f"Guest did not receive a default route via DHCP:\n{out}"
+    assert rc == 0, f"failed to configure guest network:\n{out}"
 
 
 def wait_for_network(child):
