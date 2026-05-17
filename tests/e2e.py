@@ -32,14 +32,13 @@ TIMEOUT_UPGRADE = 300  # image pull over loopback can be slow for large OS image
 
 REGISTRY_PORT = 5000
 
-# TAP-based networking gives reliable guest→host connectivity.
-# QEMU SLIRP (user-mode) does not forward guest TCP to host services on
-# arbitrary ports, so we create a TAP interface instead.
-TAP_NAME = "cbootc-test-tap"
-TAP_HOST_IP = "192.168.200.1"   # assigned to the TAP on the host
-TAP_GUEST_IP = "192.168.200.2"  # set statically inside the VM
-TAP_CIDR = "24"
-REGISTRY_HOST = TAP_HOST_IP
+# QEMU user-mode networking (SLIRP): the host is always reachable from the
+# guest at 10.0.2.2.  SLIRP forwards guest TCP connections to 10.0.2.2 to
+# the host's loopback (127.0.0.1), so the registry container bound to
+# 0.0.0.0:5000 (via --network=host) is reachable at 10.0.2.2:5000 without
+# any TAP setup or firewall rules.
+SLIRP_GATEWAY = "10.0.2.2"
+REGISTRY_HOST = SLIRP_GATEWAY
 
 OVMF_CANDIDATES = [
     "/usr/share/edk2/ovmf/OVMF_CODE.fd",       # Fedora
@@ -130,51 +129,6 @@ class LocalRegistry:
         )
 
 
-def setup_tap():
-    """Create a TAP interface on the host for VM networking (requires root)."""
-    # Clean up any leftover interface from a previous failed run.
-    subprocess.run(
-        ["ip", "tuntap", "del", TAP_NAME, "mode", "tap"],
-        check=False, capture_output=True,
-    )
-    subprocess.run(["ip", "tuntap", "add", TAP_NAME, "mode", "tap"], check=True)
-    subprocess.run(
-        ["ip", "addr", "add", f"{TAP_HOST_IP}/{TAP_CIDR}", "dev", TAP_NAME],
-        check=True,
-    )
-    subprocess.run(["ip", "link", "set", TAP_NAME, "up"], check=True)
-    # Open the TAP in the host firewall so the VM can reach the local registry.
-    # Prefer firewall-cmd (Fedora/RHEL — nftables backend ignores plain iptables
-    # rules); fall back to iptables on systems without firewalld (Ubuntu/CI).
-    try:
-        subprocess.run(
-            ["firewall-cmd", "--zone=trusted", f"--change-interface={TAP_NAME}"],
-            check=False, capture_output=True,
-        )
-    except FileNotFoundError:
-        subprocess.run(
-            ["iptables", "-I", "INPUT", "1", "-i", TAP_NAME, "-j", "ACCEPT"],
-            check=False, capture_output=True,
-        )
-
-
-def teardown_tap():
-    """Remove the TAP interface."""
-    try:
-        subprocess.run(
-            ["firewall-cmd", "--zone=trusted", f"--remove-interface={TAP_NAME}"],
-            check=False, capture_output=True,
-        )
-    except FileNotFoundError:
-        subprocess.run(
-            ["iptables", "-D", "INPUT", "-i", TAP_NAME, "-j", "ACCEPT"],
-            check=False, capture_output=True,
-        )
-    subprocess.run(["ip", "link", "set", TAP_NAME, "down"], check=False, capture_output=True)
-    subprocess.run(
-        ["ip", "tuntap", "del", TAP_NAME, "mode", "tap"],
-        check=False, capture_output=True,
-    )
 
 
 def boot(disk_image, ovmf_code, ovmf_vars=None):
@@ -202,12 +156,12 @@ def boot(disk_image, ovmf_code, ovmf_vars=None):
 
 
 def boot_with_network(disk_image, ovmf_code, ovmf_vars=None):
-    """Boot with TAP networking and a snapshot overlay.
+    """Boot with QEMU user-mode networking (SLIRP) and a snapshot overlay.
 
-    snapshot=on,format=raw: QEMU creates a temporary qcow2 overlay that
-    stores only written sectors (avoids copying the full disk image into /tmp).
-    The overlay persists across guest reboots within the same QEMU process,
-    so Boot 1 writes are visible in Boot 2 and Boot 3.
+    SLIRP requires no host-side TAP or firewall setup: the guest reaches the
+    host at 10.0.2.2 and QEMU forwards those connections to host loopback.
+    snapshot=on,format=raw keeps the overlay in QEMU without copying the full
+    image; writes persist across guest reboots within the same QEMU process.
     Omits -no-reboot so the VM can reboot within a single QEMU session.
     """
     if ovmf_vars:
@@ -224,7 +178,7 @@ def boot_with_network(disk_image, ovmf_code, ovmf_vars=None):
         f"{machine} "
         f"-drive file={disk_image},if=virtio,snapshot=on,format=raw "
         f"{pflash} "
-        f"-netdev tap,id=net0,ifname={TAP_NAME},script=no,downscript=no "
+        f"-netdev user,id=net0 "
         f"-device virtio-net-pci,netdev=net0 "
         f"-nographic"
     )
@@ -363,33 +317,40 @@ def configure_insecure_registry(child, port=REGISTRY_PORT):
 
 
 def configure_guest_network(child):
-    """Assign a static IP to the first non-loopback interface (TAP network)."""
+    """Wait for DHCP from QEMU SLIRP — no manual configuration needed."""
     rc, out = run_cmd(
         child,
-        # Re-read the interface name on every iteration: udev may rename the
-        # virtio-net device (e.g. eth0 → enp0s3) between the name lookup and
-        # ip addr add, causing ENODEV.  Retrying with a fresh lookup handles
-        # both the rename race and the case where the device isn't yet visible.
+        # QEMU SLIRP provides DHCP; NetworkManager handles it automatically.
+        # Wait up to 30 s for a default route to appear.
         "ok=0; "
         "for i in $(seq 1 30); do "
-        "  iface=$(ip -br link show | awk '!/^lo/{print $1}' | head -1); "
-        "  [ -z \"$iface\" ] && { sleep 1; continue; }; "
-        "  nmcli dev set \"$iface\" managed no 2>/dev/null; "
-        "  ip addr flush dev \"$iface\" 2>/dev/null; "
-        f"  ip addr add {TAP_GUEST_IP}/{TAP_CIDR} dev \"$iface\" 2>/dev/null "
-        f"  && ip link set \"$iface\" up && ok=1 && break; "
+        "  ip route show default | grep -q default && ok=1 && break; "
         "  sleep 1; "
         "done; "
         "[ $ok -eq 1 ]",
         timeout=35,
     )
-    assert rc == 0, f"failed to configure guest network:\n{out}"
+    assert rc == 0, f"Guest did not receive a default route via DHCP:\n{out}"
 
 
 def wait_for_network(child):
-    """Verify the host is reachable via the TAP interface."""
-    rc, _ = run_cmd(child, f"ping -c1 -W3 {TAP_HOST_IP}", timeout=10)
-    assert rc == 0, f"Host {TAP_HOST_IP} not reachable after network configuration"
+    """Wait until the registry TCP port is reachable from the guest."""
+    rc, out = run_cmd(
+        child,
+        # Test actual TCP connectivity to the registry rather than ICMP ping:
+        # the host firewall may pass ICMP but still block TCP.
+        f"ok=0; "
+        f"for i in $(seq 1 30); do "
+        f"  timeout 2 bash -c 'echo >/dev/tcp/{REGISTRY_HOST}/{REGISTRY_PORT}' "
+        f"  2>/dev/null && ok=1 && break; "
+        f"  sleep 1; "
+        f"done; "
+        f"[ $ok -eq 1 ]",
+        timeout=35,
+    )
+    assert rc == 0, (
+        f"Registry at {REGISTRY_HOST}:{REGISTRY_PORT} not reachable from guest:\n{out}"
+    )
 
 
 def test_switch(child, image_ref):
@@ -482,83 +443,79 @@ def run_upgrade_sequence(disk_image, ovmf_code, registry, uki=False,
 
     Returns (passed, failed) counts.
     """
-    setup_tap()
-    try:
-        passed = failed = 0
+    passed = failed = 0
 
-        def step(name, fn, *args):
-            nonlocal passed, failed
-            try:
-                fn(*args)
-                print(f"  PASS  {name}")
-                passed += 1
-            except AssertionError as e:
-                print(f"  FAIL  {name}: {e}")
-                failed += 1
-
-        # boot_with_network uses snapshot=on so the original disk is never
-        # modified; the QEMU-managed qcow2 overlay persists across guest
-        # reboots within the same QEMU process.
-        child = boot_with_network(disk_image, ovmf_code, ovmf_vars)
+    def step(name, fn, *args):
+        nonlocal passed, failed
         try:
-            wait_for_shell(child)
-            print("==> Boot 1 OK\n")
-
-            original_digest = get_current_digest(child)
-
-            step("configure_insecure_registry", configure_insecure_registry, child)
-            step("configure_guest_network", configure_guest_network, child)
-            step("wait_for_network", wait_for_network, child)
-
-            image_ref = (
-                f"docker://{REGISTRY_HOST}:{registry.port}/test-image:latest"
-            )
-            step("switch_to_v2", test_switch, child, image_ref)
-
-            if uki:
-                step("new_uki_entry_created", test_new_uki_entry_created, child)
-            else:
-                step("new_grub_entry_created", test_new_grub_entry_created, child)
-
-            if secure_boot:
-                step("secure_boot_enabled_boot1", test_secure_boot_enabled, child)
-
-            reboot_and_wait_for_shell(child)
-            print("\n==> Boot 2 OK\n")
-
-            step("upgraded_digest_active",
-                 test_upgraded_digest_active, child, original_digest)
-
-            if secure_boot:
-                step("secure_boot_enabled_boot2", test_secure_boot_enabled, child)
-
-            step("rollback_succeeds", test_rollback_succeeds, child)
-
-            if uki:
-                step("loader_conf_default_set", test_loader_conf_default_set, child)
-            else:
-                step("grubenv_next_entry_set", test_grubenv_next_entry_set, child)
-
-            reboot_and_wait_for_shell(child)
-            print("\n==> Boot 3 OK\n")
-
-            step("rolled_back_digest_active",
-                 test_rolled_back_digest_active, child, original_digest)
-
-            if secure_boot:
-                step("secure_boot_enabled_boot3", test_secure_boot_enabled, child)
-
-        except pexpect.TIMEOUT:
-            print("\nFAIL: timed out waiting for output")
-            print("Last output:", child.before)
+            fn(*args)
+            print(f"  PASS  {name}")
+            passed += 1
+        except AssertionError as e:
+            print(f"  FAIL  {name}: {e}")
             failed += 1
-        finally:
-            child.sendline("poweroff -f")
-            child.expect(pexpect.EOF, timeout=30)
 
-        return passed, failed
+    # boot_with_network uses snapshot=on so the original disk is never
+    # modified; the QEMU-managed qcow2 overlay persists across guest
+    # reboots within the same QEMU process.
+    child = boot_with_network(disk_image, ovmf_code, ovmf_vars)
+    try:
+        wait_for_shell(child)
+        print("==> Boot 1 OK\n")
+
+        original_digest = get_current_digest(child)
+
+        step("configure_insecure_registry", configure_insecure_registry, child)
+        step("configure_guest_network", configure_guest_network, child)
+        step("wait_for_network", wait_for_network, child)
+
+        image_ref = (
+            f"docker://{REGISTRY_HOST}:{registry.port}/test-image:latest"
+        )
+        step("switch_to_v2", test_switch, child, image_ref)
+
+        if uki:
+            step("new_uki_entry_created", test_new_uki_entry_created, child)
+        else:
+            step("new_grub_entry_created", test_new_grub_entry_created, child)
+
+        if secure_boot:
+            step("secure_boot_enabled_boot1", test_secure_boot_enabled, child)
+
+        reboot_and_wait_for_shell(child)
+        print("\n==> Boot 2 OK\n")
+
+        step("upgraded_digest_active",
+             test_upgraded_digest_active, child, original_digest)
+
+        if secure_boot:
+            step("secure_boot_enabled_boot2", test_secure_boot_enabled, child)
+
+        step("rollback_succeeds", test_rollback_succeeds, child)
+
+        if uki:
+            step("loader_conf_default_set", test_loader_conf_default_set, child)
+        else:
+            step("grubenv_next_entry_set", test_grubenv_next_entry_set, child)
+
+        reboot_and_wait_for_shell(child)
+        print("\n==> Boot 3 OK\n")
+
+        step("rolled_back_digest_active",
+             test_rolled_back_digest_active, child, original_digest)
+
+        if secure_boot:
+            step("secure_boot_enabled_boot3", test_secure_boot_enabled, child)
+
+    except pexpect.TIMEOUT:
+        print("\nFAIL: timed out waiting for output")
+        print("Last output:", child.before)
+        failed += 1
     finally:
-        teardown_tap()
+        child.sendline("poweroff -f")
+        child.expect(pexpect.EOF, timeout=30)
+
+    return passed, failed
 
 
 # ---------------------------------------------------------------------------
