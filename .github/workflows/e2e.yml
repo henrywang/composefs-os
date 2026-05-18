@@ -130,6 +130,23 @@ jobs:
       - name: Run e2e tests (UKI+SB)
         run: just e2e-uki-secureboot disk-uki-sb.raw
 
+      - name: Pull registry image for upgrade tests
+        run: sudo podman pull docker.io/library/registry:2
+
+      - name: Run upgrade/switch/rollback tests (GRUB)
+        run: just e2e-upgrade composefs-os-test:latest disk.raw
+
+      - name: Run upgrade/switch/rollback tests (GRUB + Secure Boot)
+        run: just e2e-upgrade-secureboot composefs-os-test:latest disk-sb.raw
+
+      - name: Run upgrade/switch/rollback tests (UKI)
+        run: |
+          OVMF_VARS=$(find /usr/share -name 'OVMF_VARS.fd' ! -name '*.secboot*' ! -name '*.ms.*' | head -1)
+          just e2e-uki-upgrade composefs-os-uki-test:latest disk-uki.raw "$OVMF_VARS"
+
+      - name: Run upgrade/switch/rollback tests (UKI + Secure Boot)
+        run: just e2e-uki-upgrade-secureboot composefs-os-uki-sb-test:latest disk-uki-sb.raw
+
       - name: Upload disk images on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -259,6 +276,23 @@ jobs:
 
       - name: Run e2e tests (Ubuntu UKI+SB)
         run: just e2e-uki-secureboot disk-ubuntu-uki-sb.raw
+
+      - name: Pull registry image for upgrade tests
+        run: sudo podman pull docker.io/library/registry:2
+
+      - name: Run upgrade/switch/rollback tests (Ubuntu GRUB)
+        run: just e2e-upgrade-ubuntu composefs-os-ubuntu-test:latest disk-ubuntu.raw
+
+      - name: Run upgrade/switch/rollback tests (Ubuntu GRUB + Secure Boot)
+        run: just e2e-upgrade-secureboot-ubuntu composefs-os-ubuntu-test:latest disk-ubuntu-sb.raw
+
+      - name: Run upgrade/switch/rollback tests (Ubuntu UKI)
+        run: |
+          OVMF_VARS=$(find /usr/share -name 'OVMF_VARS.fd' ! -name '*.secboot*' ! -name '*.ms.*' | head -1)
+          just e2e-uki-upgrade-ubuntu composefs-os-ubuntu-uki-test:latest disk-ubuntu-uki.raw "$OVMF_VARS"
+
+      - name: Run upgrade/switch/rollback tests (Ubuntu UKI + Secure Boot)
+        run: just e2e-uki-upgrade-secureboot-ubuntu composefs-os-ubuntu-uki-sb-test:latest disk-ubuntu-uki-sb.raw
 
       - name: Upload Ubuntu disk images on failure
         if: failure()

@@ -73,7 +73,11 @@ RUN mkdir -p /usr/share/efi/EFI/ubuntu && \
 # ---------------------------------------------------------------------------
 FROM rootfs-base AS rootfs-uki
 
+# systemd-boot: provides bootctl (boot entry management, needed by cbootc at runtime).
+# systemd-boot-efi: provides the systemd-bootx64.efi binary copied to the ESP by cbootc install.
+# Ubuntu splits these into two packages; on Fedora both are in systemd-boot-unsigned.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        systemd-boot \
         systemd-boot-efi \
         systemd-ukify \
     && rm -rf /var/lib/apt/lists/*
@@ -83,7 +87,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ---------------------------------------------------------------------------
 FROM rootfs-base AS rootfs-uki-sb
 
+# Same rationale as rootfs-uki above.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        systemd-boot \
         systemd-boot-efi \
         systemd-ukify \
         sbsigntool \

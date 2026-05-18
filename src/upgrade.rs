@@ -1,9 +1,55 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::{fs, os::unix::fs::symlink, path::Path, path::PathBuf, process::Command};
+use std::{fs, io, os::unix::fs::symlink, path::Path, path::PathBuf, process::Command};
 
 use crate::{cfsctl, config, signing};
+
+/// Set the systemd-boot default via `bootctl set-default`, writing the
+/// `LoaderEntryDefault` EFI variable (which takes priority over `loader.conf`).
+/// Silently skips if `bootctl` is not found (container/install contexts without
+/// a writable efivarfs).
+pub(crate) fn bootctl_set_default(entry_id: &str) -> Result<()> {
+    let id_with_efi = format!("{entry_id}.efi");
+    match Command::new("bootctl")
+        .args(["set-default", &id_with_efi])
+        .status()
+    {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => anyhow::bail!("bootctl set-default: exited {s}"),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).context("spawning bootctl"),
+    }
+}
+
+/// Write (or update) the `default <entry_id>` line in
+/// `<esp>/loader/loader.conf`.  Used as a fallback for contexts without a
+/// writable efivarfs (container image builds, install from live media).
+pub(crate) fn set_loader_conf_default(esp: &Path, entry_id: &str) -> Result<()> {
+    let conf = esp.join("loader/loader.conf");
+    fs::create_dir_all(conf.parent().unwrap()).context("creating loader dir")?;
+    let existing = if conf.exists() {
+        fs::read_to_string(&conf).with_context(|| format!("reading {}", conf.display()))?
+    } else {
+        String::new()
+    };
+    let mut replaced = false;
+    let mut lines: Vec<String> = existing
+        .lines()
+        .map(|l| {
+            if l.starts_with("default ") || l == "default" {
+                replaced = true;
+                format!("default {entry_id}")
+            } else {
+                l.to_owned()
+            }
+        })
+        .collect();
+    if !replaced {
+        lines.push(format!("default {entry_id}"));
+    }
+    fs::write(&conf, lines.join("\n") + "\n").with_context(|| format!("writing {}", conf.display()))
+}
 
 const EFI_ESP: &str = "/boot/efi";
 // UKIs live on the ESP, not XBOOTLDR — systemd-boot always scans its own partition.
@@ -65,12 +111,22 @@ pub fn run(reboot: bool) -> Result<()> {
             println!("Signing UKI ...");
             crate::install::sign_efi(&uki_path, Path::new(&sb.key), Path::new(&sb.cert))?;
         }
+        // Make the new UKI the permanent default.  Write both the EFI variable
+        // (via bootctl, highest priority) and loader.conf (fallback for contexts
+        // without a writable efivarfs, e.g. container image builds).
+        set_loader_conf_default(Path::new(EFI_ESP), &digest)?;
+        bootctl_set_default(&digest)?;
     } else {
         patch_bls_entry(Path::new(BOOT_DIR), &digest, &image_ref)?;
         if !crate::install::has_grub2() {
             // Ubuntu: regenerate menuentry-based grub.cfg so the new deployment
             // appears in the menu (blscfg.mod is not available on Ubuntu).
             write_grub_menuentry_cfg(Path::new(BOOT_DIR), crate::install::grub_dir())?;
+        } else {
+            // Fedora/RHEL: blscfg.mod reads BLS entries but selects the default
+            // based on grubenv `default`.  Without this update, GRUB continues
+            // to boot the previous entry regardless of the new BLS conf.
+            set_grub_default(&digest)?;
         }
     }
 
@@ -190,8 +246,9 @@ pub fn patch_bls_entry(bootdir: &Path, digest: &str, image_ref: &str) -> Result<
 /// `bootdir/loader/entries/`.  Used on distros (Ubuntu/Debian) that do not
 /// ship `blscfg.mod` in their GRUB package.
 ///
-/// Each entry gets `--id <digest>` so that rollback's `next_entry=<digest>`
-/// in grubenv correctly selects the previous deployment.
+/// Entries are sorted newest-first; index 0 is the default boot entry.
+/// rollback.rs writes `next_entry=<numeric-index>` (not the digest) for
+/// Ubuntu because GRUB does not reliably match long --id values.
 pub fn write_grub_menuentry_cfg(bootdir: &Path, grub_subdir: &str) -> Result<()> {
     let entries_dir = bootdir.join("loader/entries");
     let mut bls: Vec<(std::time::SystemTime, String, String, String)> = Vec::new();
@@ -331,6 +388,30 @@ fn write_state(digest: &str, manifest_digest: Option<&str>) -> Result<()> {
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let json = serde_json::to_string_pretty(&state).context("serializing state")?;
     fs::write(STATE_PATH, json).with_context(|| format!("writing {STATE_PATH}"))
+}
+
+/// Set the permanent GRUB default to `entry_id` via grub2-editenv/grub-editenv.
+/// If grubenv does not exist yet, skips silently (blscfg will fall back to its
+/// own sort order).
+fn set_grub_default(entry_id: &str) -> Result<()> {
+    let Some(grubenv) = ["/boot/grub2/grubenv", "/boot/grub/grubenv"]
+        .iter()
+        .find(|p| Path::new(p).exists())
+    else {
+        return Ok(());
+    };
+    for cmd in &["grub2-editenv", "grub-editenv"] {
+        match Command::new(cmd)
+            .args([*grubenv, "set", &format!("default={entry_id}")])
+            .status()
+        {
+            Ok(s) if s.success() => return Ok(()),
+            Ok(s) => anyhow::bail!("{cmd}: exited {s}"),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e).with_context(|| format!("spawning {cmd}")),
+        }
+    }
+    anyhow::bail!("neither grub2-editenv nor grub-editenv found in PATH")
 }
 
 fn trigger_reboot() -> Result<()> {

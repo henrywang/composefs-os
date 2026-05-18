@@ -34,8 +34,9 @@ RUN mkdir -p /usr/lib/systemd/system/serial-getty@ttyS0.service.d && \
     printf '[Service]\nExecStart=\nExecStart=-/sbin/agetty --autologin root --noclear %%I 115200 vt220\n' \
         > /usr/lib/systemd/system/serial-getty@ttyS0.service.d/autologin.conf
 
+# gawk provides 'awk', used by the e2e test's configure_guest_network helper.
 # Add your packages here, e.g.:
-RUN dnf install -y --setopt=install_weak_deps=False vim htop && dnf clean all
+RUN dnf install -y --setopt=install_weak_deps=False gawk && dnf clean all
 
 # --- Do not edit below this line ------------------------------------------
 
