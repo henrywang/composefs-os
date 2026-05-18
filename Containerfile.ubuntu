@@ -74,6 +74,7 @@ RUN mkdir -p /usr/share/efi/EFI/ubuntu && \
 FROM rootfs-base AS rootfs-uki
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        systemd-boot \
         systemd-boot-efi \
         systemd-ukify \
     && rm -rf /var/lib/apt/lists/*
@@ -84,6 +85,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 FROM rootfs-base AS rootfs-uki-sb
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        systemd-boot \
         systemd-boot-efi \
         systemd-ukify \
         sbsigntool \
