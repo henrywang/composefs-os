@@ -25,6 +25,60 @@ import tempfile
 import time
 import pexpect
 
+# Matches ANSI CSI sequences, OSC sequences, and bare control characters.
+_ANSI_RE = re.compile(
+    r'\x1b(?:'
+    r'\[[0-9;:]*[mABCDEFGHJKLMPSTfhil]'
+    r'|][^\x07\x1b]*(?:\x07|\x1b\\)'
+    r'|[()#%A-Za-z]'
+    r')'
+    r'|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]'
+)
+
+
+def strip_ansi(text):
+    return _ANSI_RE.sub('', text)
+
+
+class ConsoleLog:
+    """Tees pexpect output to a file; keeps stdout clean for test results."""
+
+    def __init__(self, path):
+        self.path = path
+        self._fh = open(path, 'w', encoding='utf-8', errors='replace')
+
+    def write(self, data):
+        self._fh.write(data)
+        self._fh.flush()
+
+    def flush(self):
+        self._fh.flush()
+
+    def close(self):
+        self._fh.close()
+
+    def tail(self, n=40):
+        """Return the last n non-empty lines of the log, stripped of ANSI."""
+        try:
+            with open(self.path, encoding='utf-8', errors='replace') as f:
+                raw = f.read()
+            lines = [l for l in strip_ansi(raw).splitlines() if l.strip()]
+            return '\n'.join(lines[-n:])
+        except OSError:
+            return ''
+
+
+def _print_console_tail(log, n=40):
+    if log is None:
+        return
+    tail = log.tail(n)
+    if tail:
+        print("        ── last console output ──────────────────────────────")
+        for line in tail.splitlines():
+            print(f"        {line}")
+        print(f"        ── full log: {log.path} ──────────────────────────")
+
+
 PROMPT = r"(?:\[root@[^\]]+\]#|root@[^:]+:[^#]*#)"
 TIMEOUT_BOOT = 180
 TIMEOUT_CMD = 30
@@ -131,7 +185,7 @@ class LocalRegistry:
 
 
 
-def boot(disk_image, ovmf_code, ovmf_vars=None):
+def boot(disk_image, ovmf_code, ovmf_vars=None, log=None):
     if ovmf_vars:
         # Secure Boot OVMF requires q35 + SMM for the firmware's variable-locking
         # code; without smm=on the firmware stalls silently before any serial output.
@@ -151,11 +205,11 @@ def boot(disk_image, ovmf_code, ovmf_vars=None):
         f"-nographic -no-reboot"
     )
     child = pexpect.spawn(cmd, timeout=TIMEOUT_BOOT, encoding="utf-8")
-    child.logfile_read = sys.stdout
+    child.logfile_read = log
     return child
 
 
-def boot_with_network(disk_image, ovmf_code, ovmf_vars=None):
+def boot_with_network(disk_image, ovmf_code, ovmf_vars=None, log=None):
     """Boot with QEMU user-mode networking (SLIRP) and a snapshot overlay.
 
     SLIRP requires no host-side TAP or firewall setup: the guest reaches the
@@ -183,7 +237,7 @@ def boot_with_network(disk_image, ovmf_code, ovmf_vars=None):
         f"-nographic"
     )
     child = pexpect.spawn(cmd, timeout=TIMEOUT_BOOT, encoding="utf-8")
-    child.logfile_read = sys.stdout
+    child.logfile_read = log
     return child
 
 
@@ -213,7 +267,7 @@ def run_cmd(child, cmd, timeout=TIMEOUT_CMD):
     child.sendline(f"{cmd}; echo {marker}$?")
     child.expect(rf"{marker}(\d+)", timeout=timeout)
     exit_code = int(child.match.group(1))
-    output = child.before
+    output = strip_ansi(child.before)
     child.expect(PROMPT, timeout=timeout)
     return exit_code, output
 
@@ -446,7 +500,7 @@ def test_rolled_back_digest_active(child, expected_digest):
 
 
 def run_upgrade_sequence(disk_image, ovmf_code, registry, uki=False,
-                         secure_boot=False, ovmf_vars=None):
+                         secure_boot=False, ovmf_vars=None, log=None):
     """Three-boot upgrade → rollback sequence on a sparse copy of disk_image.
 
     Boot 1: configure insecure registry, cbootc switch to v2, verify new entry,
@@ -467,12 +521,13 @@ def run_upgrade_sequence(disk_image, ovmf_code, registry, uki=False,
             passed += 1
         except AssertionError as e:
             print(f"  FAIL  {name}: {e}")
+            _print_console_tail(log)
             failed += 1
 
     # boot_with_network uses snapshot=on so the original disk is never
     # modified; the QEMU-managed qcow2 overlay persists across guest
     # reboots within the same QEMU process.
-    child = boot_with_network(disk_image, ovmf_code, ovmf_vars)
+    child = boot_with_network(disk_image, ovmf_code, ovmf_vars, log=log)
     try:
         wait_for_shell(child)
         print("==> Boot 1 OK\n")
@@ -523,7 +578,7 @@ def run_upgrade_sequence(disk_image, ovmf_code, registry, uki=False,
 
     except pexpect.TIMEOUT:
         print("\nFAIL: timed out waiting for output")
-        print("Last output:", child.before)
+        _print_console_tail(log, n=50)
         failed += 1
     finally:
         child.sendline("poweroff -f")
@@ -588,6 +643,11 @@ def main():
     )
     args = parser.parse_args()
 
+    log_path = os.path.join(os.getcwd(), "e2e-console.log")
+    log = ConsoleLog(log_path)
+    print(f"Console log: {log_path}")
+    print(f"  (run 'tail -f {log_path}' in another terminal to follow boot output)")
+
     ovmf_vars_tmp = None
     try:
         if args.secure_boot:
@@ -649,12 +709,13 @@ def main():
                 passed, failed = run_upgrade_sequence(
                     args.disk_image, ovmf_code, registry,
                     uki=uki, secure_boot=secure_boot, ovmf_vars=ovmf_vars_tmp,
+                    log=log,
                 )
             print(f"\n{passed} passed, {failed} failed")
             sys.exit(0 if failed == 0 else 1)
 
         print(f"Booting {args.disk_image} ...")
-        child = boot(args.disk_image, ovmf_code, ovmf_vars_tmp)
+        child = boot(args.disk_image, ovmf_code, ovmf_vars_tmp, log=log)
 
         try:
             wait_for_shell(child)
@@ -669,6 +730,7 @@ def main():
                     passed += 1
                 except AssertionError as e:
                     print(f"  FAIL  {name}: {e}")
+                    _print_console_tail(log)
                     failed += 1
 
             print(f"\n{passed} passed, {failed} failed")
@@ -676,13 +738,13 @@ def main():
 
         except pexpect.TIMEOUT:
             print("\nFAIL: timed out waiting for output")
-            print("Last output:")
-            print(child.before)
+            _print_console_tail(log, n=50)
             sys.exit(1)
         finally:
             child.sendline("poweroff -f")
             child.expect(pexpect.EOF, timeout=30)
     finally:
+        log.close()
         if ovmf_vars_tmp and os.path.exists(ovmf_vars_tmp):
             os.unlink(ovmf_vars_tmp)
 

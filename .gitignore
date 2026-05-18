@@ -4,3 +4,5 @@
 *.raw
 *.raw.sb.cer
 ovmf-vars-*.fd
+/tests/__pycache__/
+/e2e-console.log
