@@ -551,8 +551,24 @@ def run_upgrade_sequence(disk_image, ovmf_code, registry, uki=False,
         if secure_boot:
             step("secure_boot_enabled_boot1", test_secure_boot_enabled, child)
 
+        if uki:
+            rc, lconf = run_cmd(child, "cat /boot/efi/loader/loader.conf 2>/dev/null || echo MISSING")
+            print(f"  [diag] loader.conf after switch:\n{lconf.strip()}")
+            rc, efis = run_cmd(child, "ls -la /boot/efi/EFI/Linux/ 2>/dev/null")
+            print(f"  [diag] EFI/Linux:\n{efis.strip()}")
+            rc, btlist = run_cmd(child, "bootctl list 2>&1 | head -60 || echo NO_BOOTCTL")
+            print(f"  [diag] bootctl list:\n{btlist.strip()}")
+
         reboot_and_wait_for_shell(child)
         print("\n==> Boot 2 OK\n")
+
+        if uki:
+            rc, cmdline2 = run_cmd(child, "cat /proc/cmdline")
+            print(f"  [diag] /proc/cmdline Boot 2: {cmdline2.strip()!r}")
+            rc, lconf2 = run_cmd(child, "cat /boot/efi/loader/loader.conf 2>/dev/null || echo MISSING")
+            print(f"  [diag] loader.conf Boot 2:\n{lconf2.strip()}")
+            rc, btstatus = run_cmd(child, "bootctl status 2>&1 | head -30 || echo NO_BOOTCTL")
+            print(f"  [diag] bootctl status Boot 2:\n{btstatus.strip()}")
 
         step("upgraded_digest_active",
              test_upgraded_digest_active, child, original_digest)
