@@ -5,10 +5,26 @@ use std::{fs, io, os::unix::fs::symlink, path::Path, path::PathBuf, process::Com
 
 use crate::{cfsctl, config, signing};
 
+/// Set the systemd-boot default via `bootctl set-default`, writing the
+/// `LoaderEntryDefault` EFI variable (which takes priority over `loader.conf`).
+/// Silently skips if `bootctl` is not found (container/install contexts without
+/// a writable efivarfs).
+pub(crate) fn bootctl_set_default(entry_id: &str) -> Result<()> {
+    let id_with_efi = format!("{entry_id}.efi");
+    match Command::new("bootctl")
+        .args(["set-default", &id_with_efi])
+        .status()
+    {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => anyhow::bail!("bootctl set-default: exited {s}"),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).context("spawning bootctl"),
+    }
+}
+
 /// Write (or update) the `default <entry_id>` line in
-/// `<esp>/loader/loader.conf` so systemd-boot boots `entry_id` on the next
-/// reboot.  Writing the file directly avoids any dependency on `bootctl` or a
-/// writable efivarfs — both of which may be absent in container/VM contexts.
+/// `<esp>/loader/loader.conf`.  Used as a fallback for contexts without a
+/// writable efivarfs (container image builds, install from live media).
 pub(crate) fn set_loader_conf_default(esp: &Path, entry_id: &str) -> Result<()> {
     let conf = esp.join("loader/loader.conf");
     fs::create_dir_all(conf.parent().unwrap()).context("creating loader dir")?;
@@ -95,11 +111,11 @@ pub fn run(reboot: bool) -> Result<()> {
             println!("Signing UKI ...");
             crate::install::sign_efi(&uki_path, Path::new(&sb.key), Path::new(&sb.cert))?;
         }
-        // Make the new UKI the permanent default so systemd-boot boots it on
-        // the next reboot regardless of how the EFI/Linux/*.efi entries sort.
-        // Write loader.conf directly — does not require `bootctl` or a
-        // writable efivarfs (both may be absent in container/VM contexts).
+        // Make the new UKI the permanent default.  Write both the EFI variable
+        // (via bootctl, highest priority) and loader.conf (fallback for contexts
+        // without a writable efivarfs, e.g. container image builds).
         set_loader_conf_default(Path::new(EFI_ESP), &digest)?;
+        bootctl_set_default(&digest)?;
     } else {
         patch_bls_entry(Path::new(BOOT_DIR), &digest, &image_ref)?;
         if !crate::install::has_grub2() {

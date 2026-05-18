@@ -180,6 +180,7 @@ pub fn run() -> Result<()> {
     let id = entry_id(&previous.path);
     if systemd_boot {
         crate::upgrade::set_loader_conf_default(std::path::Path::new("/boot/efi"), id)?;
+        crate::upgrade::bootctl_set_default(id)?;
     } else if crate::install::has_grub2() {
         // Fedora/RHEL: grub2's blscfg.mod reads BLS entries natively and
         // matches next_entry=<digest> against each entry's --id.
