@@ -79,11 +79,12 @@ shim-signed,efibootmgr" \
 # across Ubuntu releases (e.g. /usr/lib/shim/ vs /usr/lib/shim-signed/).
 RUN set -e && \
     mkdir -p /rootfs/usr/share/efi/EFI/ubuntu && \
-    SHIM=$(find /rootfs/usr/lib/shim* 2>/dev/null \
-        \( -name "shimx64.efi.signed" -o -name "shimx64.efi" \) \
-        ! -name "*.latest" | head -1) && \
-    MM=$(find /rootfs/usr/lib/shim* 2>/dev/null -name "mmx64.efi" | head -1) && \
-    GRUB=$(find /rootfs/usr/lib/grub 2>/dev/null -name "grubx64.efi.signed" | head -1) && \
+    SHIM=$(find -L /rootfs/usr/lib/shim* 2>/dev/null \
+        -type f -name "shimx64.efi*" | grep -Ev '\.latest$' | sort | tail -1) && \
+    MM=$(find -L /rootfs/usr/lib/shim* 2>/dev/null \
+        -type f -name "mmx64.efi" | head -1) && \
+    GRUB=$(find -L /rootfs/usr/lib/grub 2>/dev/null \
+        -type f -name "grubx64.efi.signed" | head -1) && \
     test -n "$SHIM" && test -n "$MM" && test -n "$GRUB" && \
     cp "$SHIM" /rootfs/usr/share/efi/EFI/ubuntu/shimx64.efi && \
     cp "$MM"   /rootfs/usr/share/efi/EFI/ubuntu/mmx64.efi && \
