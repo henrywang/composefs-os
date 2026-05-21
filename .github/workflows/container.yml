@@ -13,6 +13,17 @@ jobs:
       packages: write
 
     steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v1.3.0
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: false
+          swap-storage: false
+
       - uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
