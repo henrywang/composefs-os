@@ -75,11 +75,19 @@ shim-signed,efibootmgr" \
 
 # Stage signed EFI binaries at a fixed path so cbootc find_shim_dir() can
 # discover them and copy them to the ESP under EFI/ubuntu.
-RUN mkdir -p /rootfs/usr/share/efi/EFI/ubuntu && \
-    cp /rootfs/usr/lib/shim/shimx64.efi.signed  /rootfs/usr/share/efi/EFI/ubuntu/shimx64.efi && \
-    cp /rootfs/usr/lib/shim/mmx64.efi           /rootfs/usr/share/efi/EFI/ubuntu/mmx64.efi && \
-    cp /rootfs/usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed \
-                                                 /rootfs/usr/share/efi/EFI/ubuntu/grubx64.efi
+# Use find rather than hardcoded paths: shim-signed install location has shifted
+# across Ubuntu releases (e.g. /usr/lib/shim/ vs /usr/lib/shim-signed/).
+RUN set -e && \
+    mkdir -p /rootfs/usr/share/efi/EFI/ubuntu && \
+    SHIM=$(find /rootfs/usr/lib/shim* 2>/dev/null \
+        \( -name "shimx64.efi.signed" -o -name "shimx64.efi" \) \
+        ! -name "*.latest" | head -1) && \
+    MM=$(find /rootfs/usr/lib/shim* 2>/dev/null -name "mmx64.efi" | head -1) && \
+    GRUB=$(find /rootfs/usr/lib/grub 2>/dev/null -name "grubx64.efi.signed" | head -1) && \
+    test -n "$SHIM" && test -n "$MM" && test -n "$GRUB" && \
+    cp "$SHIM" /rootfs/usr/share/efi/EFI/ubuntu/shimx64.efi && \
+    cp "$MM"   /rootfs/usr/share/efi/EFI/ubuntu/mmx64.efi && \
+    cp "$GRUB" /rootfs/usr/share/efi/EFI/ubuntu/grubx64.efi
 
 # ---------------------------------------------------------------------------
 # Stage 2b: Fresh UKI rootfs via mmdebstrap
