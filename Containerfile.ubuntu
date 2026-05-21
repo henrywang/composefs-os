@@ -1,4 +1,6 @@
 # composefs-os:ubuntu-26.04 — Base images for composefs-rs bootable Ubuntu 26.04 systems.
+# ubuntu:26.04 is used only as a build host; final images are bootstrapped via
+# mmdebstrap into /rootfs and copied FROM scratch — no base-image inheritance.
 #
 # Three named targets are available (default: grub):
 #   --target grub           GRUB-based boot (shim → grub2, BLS Type 1)
@@ -6,9 +8,9 @@
 #   --target uki-secureboot systemd-boot + UKI + Secure Boot signing tools
 #
 # Build:
-#   podman build -t composefs-os:ubuntu-26.04          -f Containerfile.ubuntu .          # GRUB
-#   podman build -t composefs-os:ubuntu-26.04-uki      --target uki -f Containerfile.ubuntu .
-#   podman build -t composefs-os:ubuntu-26.04-uki-sb   --target uki-secureboot -f Containerfile.ubuntu .
+#   podman build -t composefs-os:ubuntu-26.04        -f Containerfile.ubuntu .
+#   podman build -t composefs-os:ubuntu-26.04-uki    --target uki -f Containerfile.ubuntu .
+#   podman build -t composefs-os:ubuntu-26.04-uki-sb --target uki-secureboot -f Containerfile.ubuntu .
 
 # ---------------------------------------------------------------------------
 # Stage 0a: Build cbootc
@@ -30,88 +32,131 @@ RUN cargo build --release -p composefs-ctl && \
     cargo build --release -p composefs-setup-root --no-default-features
 
 # ---------------------------------------------------------------------------
-# Stage 1: Install common Ubuntu 26.04 packages
+# Stage 1: Build host — ubuntu:26.04 provides mmdebstrap and dracut.
+# This stage (and ubuntu:26.04 itself) does NOT appear in any final image.
+# The distro suite name is captured once here and reused by all mmdebstrap calls.
 # ---------------------------------------------------------------------------
-FROM ubuntu:26.04 AS rootfs-base
-
+FROM ubuntu:26.04 AS builder
 ENV DEBIAN_FRONTEND=noninteractive
-
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        linux-image-generic linux-firmware \
-        systemd systemd-sysv udev dbus-broker systemd-resolved \
-        network-manager iproute2 iputils-ping \
-        e2fsprogs dosfstools btrfs-progs \
-        fdisk \
-        dracut dracut-network \
-        podman skopeo \
-        vim-tiny less \
-    && apt-get purge -y initramfs-tools initramfs-tools-core \
-    && apt-get autoremove -y \
+        mmdebstrap \
+        dracut \
+        dracut-network \
     && rm -rf /var/lib/apt/lists/*
+RUN . /etc/os-release && echo "$VERSION_CODENAME" > /SUITE
 
 # ---------------------------------------------------------------------------
-# Stage 2a: GRUB — install bootloader packages
+# Stage 2a: Fresh GRUB rootfs via mmdebstrap
 # ---------------------------------------------------------------------------
-FROM rootfs-base AS rootfs-grub
+FROM builder AS rootfs-grub
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        grub-efi-amd64 grub-efi-amd64-bin grub-efi-amd64-signed \
-        shim-signed efibootmgr \
-    && rm -rf /var/lib/apt/lists/*
+# Suppress initrd generation during kernel package postinst: linux-image-generic
+# calls update-initramfs which is not installed in the minbase variant.
+# We build the initramfs ourselves via dracut --sysroot below.
+RUN SUITE=$(cat /SUITE) && \
+    mmdebstrap \
+        --variant=minbase \
+        --components="main restricted universe" \
+        --aptopt='APT::Install-Recommends "false"' \
+        --setup-hook='echo "do_initrd = No" > "$1/etc/kernel-img.conf"' \
+        --include="\
+linux-image-generic,linux-firmware,\
+systemd,systemd-sysv,udev,dbus-broker,systemd-resolved,\
+network-manager,iproute2,iputils-ping,\
+e2fsprogs,dosfstools,btrfs-progs,\
+fdisk,\
+dracut,dracut-network,\
+podman,skopeo,\
+vim-tiny,less,\
+grub-efi-amd64,grub-efi-amd64-bin,grub-efi-amd64-signed,\
+shim-signed,efibootmgr" \
+        "$SUITE" /rootfs \
+        http://archive.ubuntu.com/ubuntu
 
-# Stage signed EFI binaries at a fixed path (dropping .signed suffix) so
-# install.rs find_shim_dir() can discover them and cbootc can copy them to
-# the ESP with the correct compiled-in prefix (EFI/ubuntu).
-RUN mkdir -p /usr/share/efi/EFI/ubuntu && \
-    cp /usr/lib/shim/shimx64.efi.signed   /usr/share/efi/EFI/ubuntu/shimx64.efi && \
-    cp /usr/lib/shim/mmx64.efi            /usr/share/efi/EFI/ubuntu/mmx64.efi && \
-    cp /usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed \
-                                          /usr/share/efi/EFI/ubuntu/grubx64.efi
+# Stage signed EFI binaries at a fixed path so cbootc find_shim_dir() can
+# discover them and copy them to the ESP under EFI/ubuntu.
+# Use find rather than hardcoded paths: shim-signed install location has shifted
+# across Ubuntu releases (e.g. /usr/lib/shim/ vs /usr/lib/shim-signed/).
+RUN set -e && \
+    mkdir -p /rootfs/usr/share/efi/EFI/ubuntu && \
+    SHIM=$(find -L /rootfs/usr/lib/shim* 2>/dev/null \
+        -type f -name "shimx64.efi*" | grep -Ev '\.latest$' | sort | tail -1) && \
+    MM=$(find -L /rootfs/usr/lib/shim* 2>/dev/null \
+        -type f -name "mmx64.efi" | head -1) && \
+    GRUB=$(find -L /rootfs/usr/lib/grub 2>/dev/null \
+        -type f -name "grubx64.efi.signed" | head -1) && \
+    test -n "$SHIM" && test -n "$MM" && test -n "$GRUB" && \
+    cp "$SHIM" /rootfs/usr/share/efi/EFI/ubuntu/shimx64.efi && \
+    cp "$MM"   /rootfs/usr/share/efi/EFI/ubuntu/mmx64.efi && \
+    cp "$GRUB" /rootfs/usr/share/efi/EFI/ubuntu/grubx64.efi
 
 # ---------------------------------------------------------------------------
-# Stage 2b: UKI — install systemd-boot
+# Stage 2b: Fresh UKI rootfs via mmdebstrap
+# systemd-boot: bootctl binary.  systemd-boot-efi: systemd-bootx64.efi binary.
+# Ubuntu splits these into two packages; Fedora bundles both in systemd-boot-unsigned.
 # ---------------------------------------------------------------------------
-FROM rootfs-base AS rootfs-uki
+FROM builder AS rootfs-uki
 
-# systemd-boot: provides bootctl (boot entry management, needed by cbootc at runtime).
-# systemd-boot-efi: provides the systemd-bootx64.efi binary copied to the ESP by cbootc install.
-# Ubuntu splits these into two packages; on Fedora both are in systemd-boot-unsigned.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        systemd-boot \
-        systemd-boot-efi \
-        systemd-ukify \
-    && rm -rf /var/lib/apt/lists/*
+RUN SUITE=$(cat /SUITE) && \
+    mmdebstrap \
+        --variant=minbase \
+        --components="main restricted universe" \
+        --aptopt='APT::Install-Recommends "false"' \
+        --setup-hook='echo "do_initrd = No" > "$1/etc/kernel-img.conf"' \
+        --include="\
+linux-image-generic,linux-firmware,\
+systemd,systemd-sysv,udev,dbus-broker,systemd-resolved,\
+network-manager,iproute2,iputils-ping,\
+e2fsprogs,dosfstools,btrfs-progs,\
+fdisk,\
+dracut,dracut-network,\
+podman,skopeo,\
+vim-tiny,less,\
+systemd-boot,systemd-boot-efi,systemd-ukify" \
+        "$SUITE" /rootfs \
+        http://archive.ubuntu.com/ubuntu
 
 # ---------------------------------------------------------------------------
-# Stage 2c: UKI + Secure Boot — adds sbsigntools and openssl
+# Stage 2c: Fresh UKI + Secure Boot rootfs via mmdebstrap
 # ---------------------------------------------------------------------------
-FROM rootfs-base AS rootfs-uki-sb
+FROM builder AS rootfs-uki-sb
 
-# Same rationale as rootfs-uki above.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        systemd-boot \
-        systemd-boot-efi \
-        systemd-ukify \
-        sbsigntool \
-        openssl \
-    && rm -rf /var/lib/apt/lists/*
+RUN SUITE=$(cat /SUITE) && \
+    mmdebstrap \
+        --variant=minbase \
+        --components="main restricted universe" \
+        --aptopt='APT::Install-Recommends "false"' \
+        --setup-hook='echo "do_initrd = No" > "$1/etc/kernel-img.conf"' \
+        --include="\
+linux-image-generic,linux-firmware,\
+systemd,systemd-sysv,udev,dbus-broker,systemd-resolved,\
+network-manager,iproute2,iputils-ping,\
+e2fsprogs,dosfstools,btrfs-progs,\
+fdisk,\
+dracut,dracut-network,\
+podman,skopeo,\
+vim-tiny,less,\
+systemd-boot,systemd-boot-efi,systemd-ukify,\
+sbsigntool,openssl" \
+        "$SUITE" /rootfs \
+        http://archive.ubuntu.com/ubuntu
 
 # ---------------------------------------------------------------------------
 # Finalization macro (applied once per variant below):
 #   1. composefs dracut module
-#   2. Build initramfs + canonicalize vmlinuz path
+#   2. Build initramfs via dracut --sysroot (same approach as Fedora)
 #   3. /sysroot mount-point; /home /opt /srv → var/ symlinks
-#   4. Install cfsctl, cbootc, units; enable services
+#   4. Install cfsctl, cbootc, update units; enable services
 #   5. Clear /boot
 # ---------------------------------------------------------------------------
 
 FROM rootfs-grub AS grub-final
 
-RUN mkdir -p /usr/lib/dracut/modules.d/37composefs
+RUN mkdir -p /rootfs/usr/lib/dracut/modules.d/37composefs
 COPY --from=composefs-builder \
     /build/target/release/composefs-setup-root \
-    /usr/lib/dracut/modules.d/37composefs/composefs-setup-root
-RUN cat > /usr/lib/dracut/modules.d/37composefs/module-setup.sh <<'EOF'
+    /rootfs/usr/lib/dracut/modules.d/37composefs/composefs-setup-root
+RUN cat > /rootfs/usr/lib/dracut/modules.d/37composefs/module-setup.sh <<'EOF'
 #!/usr/bin/bash
 check() { return 0; }
 depends() { return 0; }
@@ -123,8 +168,8 @@ install() {
         initrd-root-fs.target composefs-setup-root.service
 }
 EOF
-RUN chmod +x /usr/lib/dracut/modules.d/37composefs/module-setup.sh
-RUN cat > /usr/lib/dracut/modules.d/37composefs/composefs-setup-root.service <<'EOF'
+RUN chmod +x /rootfs/usr/lib/dracut/modules.d/37composefs/module-setup.sh
+RUN cat > /rootfs/usr/lib/dracut/modules.d/37composefs/composefs-setup-root.service <<'EOF'
 [Unit]
 DefaultDependencies=no
 ConditionKernelCommandLine=composefs
@@ -145,40 +190,42 @@ StandardError=journal+console
 RemainAfterExit=yes
 EOF
 
-RUN KVER=$(ls /lib/modules | head -1) && \
-    dracut --force --no-hostonly --kver "$KVER" \
+RUN KVER=$(ls /rootfs/usr/lib/modules | head -1) && \
+    dracut --sysroot /rootfs \
+        --force --no-hostonly --kver "$KVER" \
         --tmpdir /tmp \
         --add "systemd systemd-initrd dbus base bash composefs" \
         --add-drivers "overlay erofs loop virtio_blk virtio_pci vfat" \
         --reproducible \
-        "/usr/lib/modules/$KVER/initramfs.img" && \
-    if [ -f "/boot/vmlinuz-$KVER" ] && \
-       [ ! -f "/usr/lib/modules/$KVER/vmlinuz" ]; then \
-        cp "/boot/vmlinuz-$KVER" "/usr/lib/modules/$KVER/vmlinuz"; \
+        "/rootfs/usr/lib/modules/$KVER/initramfs.img" && \
+    if [ -f "/rootfs/boot/vmlinuz-$KVER" ] && \
+       [ ! -f "/rootfs/usr/lib/modules/$KVER/vmlinuz" ]; then \
+        cp "/rootfs/boot/vmlinuz-$KVER" \
+           "/rootfs/usr/lib/modules/$KVER/vmlinuz"; \
     fi
 
-RUN mkdir -p /sysroot && \
-    mkdir -p /var/home /var/opt /var/srv && \
-    rm -rf /home /opt /srv && \
-    ln -sf var/home /home && \
-    ln -sf var/opt  /opt && \
-    ln -sf var/srv  /srv
+RUN mkdir -p /rootfs/sysroot && \
+    mkdir -p /rootfs/var/home /rootfs/var/opt /rootfs/var/srv && \
+    rm -rf /rootfs/home /rootfs/opt /rootfs/srv && \
+    ln -sf var/home /rootfs/home && \
+    ln -sf var/opt  /rootfs/opt && \
+    ln -sf var/srv  /rootfs/srv
 
-COPY --from=composefs-builder /build/target/release/cfsctl /usr/bin/cfsctl
-COPY --from=cbootc-builder /build/target/release/cbootc /usr/bin/cbootc
+COPY --from=composefs-builder /build/target/release/cfsctl /rootfs/usr/bin/cfsctl
+COPY --from=cbootc-builder /build/target/release/cbootc /rootfs/usr/bin/cbootc
 COPY units/cbootc-update.service units/cbootc-update.timer \
-    /usr/lib/systemd/system/
-RUN systemctl --root / enable \
+    /rootfs/usr/lib/systemd/system/
+RUN systemctl --root /rootfs enable \
         NetworkManager.service systemd-resolved.service cbootc-update.timer && \
-    systemctl --root / set-default multi-user.target
+    systemctl --root /rootfs set-default multi-user.target
 
-RUN rm -rf /boot/*
+RUN rm -rf /rootfs/boot/*
 
 # ---------------------------------------------------------------------------
 # Final stage: GRUB (default target)
 # ---------------------------------------------------------------------------
 FROM scratch AS grub
-COPY --from=grub-final / /
+COPY --from=grub-final /rootfs /
 
 LABEL containers.bootc=1
 LABEL composefs.backend=cfs-rs
@@ -191,11 +238,11 @@ CMD ["/sbin/init"]
 # ---------------------------------------------------------------------------
 FROM rootfs-uki AS uki-final
 
-RUN mkdir -p /usr/lib/dracut/modules.d/37composefs
+RUN mkdir -p /rootfs/usr/lib/dracut/modules.d/37composefs
 COPY --from=composefs-builder \
     /build/target/release/composefs-setup-root \
-    /usr/lib/dracut/modules.d/37composefs/composefs-setup-root
-RUN cat > /usr/lib/dracut/modules.d/37composefs/module-setup.sh <<'EOF'
+    /rootfs/usr/lib/dracut/modules.d/37composefs/composefs-setup-root
+RUN cat > /rootfs/usr/lib/dracut/modules.d/37composefs/module-setup.sh <<'EOF'
 #!/usr/bin/bash
 check() { return 0; }
 depends() { return 0; }
@@ -207,8 +254,8 @@ install() {
         initrd-root-fs.target composefs-setup-root.service
 }
 EOF
-RUN chmod +x /usr/lib/dracut/modules.d/37composefs/module-setup.sh
-RUN cat > /usr/lib/dracut/modules.d/37composefs/composefs-setup-root.service <<'EOF'
+RUN chmod +x /rootfs/usr/lib/dracut/modules.d/37composefs/module-setup.sh
+RUN cat > /rootfs/usr/lib/dracut/modules.d/37composefs/composefs-setup-root.service <<'EOF'
 [Unit]
 DefaultDependencies=no
 ConditionKernelCommandLine=composefs
@@ -229,40 +276,42 @@ StandardError=journal+console
 RemainAfterExit=yes
 EOF
 
-RUN KVER=$(ls /lib/modules | head -1) && \
-    dracut --force --no-hostonly --kver "$KVER" \
+RUN KVER=$(ls /rootfs/usr/lib/modules | head -1) && \
+    dracut --sysroot /rootfs \
+        --force --no-hostonly --kver "$KVER" \
         --tmpdir /tmp \
         --add "systemd systemd-initrd dbus base bash composefs" \
         --add-drivers "overlay erofs loop virtio_blk virtio_pci vfat" \
         --reproducible \
-        "/usr/lib/modules/$KVER/initramfs.img" && \
-    if [ -f "/boot/vmlinuz-$KVER" ] && \
-       [ ! -f "/usr/lib/modules/$KVER/vmlinuz" ]; then \
-        cp "/boot/vmlinuz-$KVER" "/usr/lib/modules/$KVER/vmlinuz"; \
+        "/rootfs/usr/lib/modules/$KVER/initramfs.img" && \
+    if [ -f "/rootfs/boot/vmlinuz-$KVER" ] && \
+       [ ! -f "/rootfs/usr/lib/modules/$KVER/vmlinuz" ]; then \
+        cp "/rootfs/boot/vmlinuz-$KVER" \
+           "/rootfs/usr/lib/modules/$KVER/vmlinuz"; \
     fi
 
-RUN mkdir -p /sysroot && \
-    mkdir -p /var/home /var/opt /var/srv && \
-    rm -rf /home /opt /srv && \
-    ln -sf var/home /home && \
-    ln -sf var/opt  /opt && \
-    ln -sf var/srv  /srv
+RUN mkdir -p /rootfs/sysroot && \
+    mkdir -p /rootfs/var/home /rootfs/var/opt /rootfs/var/srv && \
+    rm -rf /rootfs/home /rootfs/opt /rootfs/srv && \
+    ln -sf var/home /rootfs/home && \
+    ln -sf var/opt  /rootfs/opt && \
+    ln -sf var/srv  /rootfs/srv
 
-COPY --from=composefs-builder /build/target/release/cfsctl /usr/bin/cfsctl
-COPY --from=cbootc-builder /build/target/release/cbootc /usr/bin/cbootc
+COPY --from=composefs-builder /build/target/release/cfsctl /rootfs/usr/bin/cfsctl
+COPY --from=cbootc-builder /build/target/release/cbootc /rootfs/usr/bin/cbootc
 COPY units/cbootc-update.service units/cbootc-update.timer \
-    /usr/lib/systemd/system/
-RUN systemctl --root / enable \
+    /rootfs/usr/lib/systemd/system/
+RUN systemctl --root /rootfs enable \
         NetworkManager.service systemd-resolved.service cbootc-update.timer && \
-    systemctl --root / set-default multi-user.target
+    systemctl --root /rootfs set-default multi-user.target
 
-RUN rm -rf /boot/*
+RUN rm -rf /rootfs/boot/*
 
 # ---------------------------------------------------------------------------
 # Final stage: UKI (--target uki)
 # ---------------------------------------------------------------------------
 FROM scratch AS uki
-COPY --from=uki-final / /
+COPY --from=uki-final /rootfs /
 
 LABEL containers.bootc=1
 LABEL composefs.backend=cfs-rs
@@ -276,11 +325,11 @@ CMD ["/sbin/init"]
 # ---------------------------------------------------------------------------
 FROM rootfs-uki-sb AS uki-sb-final
 
-RUN mkdir -p /usr/lib/dracut/modules.d/37composefs
+RUN mkdir -p /rootfs/usr/lib/dracut/modules.d/37composefs
 COPY --from=composefs-builder \
     /build/target/release/composefs-setup-root \
-    /usr/lib/dracut/modules.d/37composefs/composefs-setup-root
-RUN cat > /usr/lib/dracut/modules.d/37composefs/module-setup.sh <<'EOF'
+    /rootfs/usr/lib/dracut/modules.d/37composefs/composefs-setup-root
+RUN cat > /rootfs/usr/lib/dracut/modules.d/37composefs/module-setup.sh <<'EOF'
 #!/usr/bin/bash
 check() { return 0; }
 depends() { return 0; }
@@ -292,8 +341,8 @@ install() {
         initrd-root-fs.target composefs-setup-root.service
 }
 EOF
-RUN chmod +x /usr/lib/dracut/modules.d/37composefs/module-setup.sh
-RUN cat > /usr/lib/dracut/modules.d/37composefs/composefs-setup-root.service <<'EOF'
+RUN chmod +x /rootfs/usr/lib/dracut/modules.d/37composefs/module-setup.sh
+RUN cat > /rootfs/usr/lib/dracut/modules.d/37composefs/composefs-setup-root.service <<'EOF'
 [Unit]
 DefaultDependencies=no
 ConditionKernelCommandLine=composefs
@@ -314,40 +363,42 @@ StandardError=journal+console
 RemainAfterExit=yes
 EOF
 
-RUN KVER=$(ls /lib/modules | head -1) && \
-    dracut --force --no-hostonly --kver "$KVER" \
+RUN KVER=$(ls /rootfs/usr/lib/modules | head -1) && \
+    dracut --sysroot /rootfs \
+        --force --no-hostonly --kver "$KVER" \
         --tmpdir /tmp \
         --add "systemd systemd-initrd dbus base bash composefs" \
         --add-drivers "overlay erofs loop virtio_blk virtio_pci vfat" \
         --reproducible \
-        "/usr/lib/modules/$KVER/initramfs.img" && \
-    if [ -f "/boot/vmlinuz-$KVER" ] && \
-       [ ! -f "/usr/lib/modules/$KVER/vmlinuz" ]; then \
-        cp "/boot/vmlinuz-$KVER" "/usr/lib/modules/$KVER/vmlinuz"; \
+        "/rootfs/usr/lib/modules/$KVER/initramfs.img" && \
+    if [ -f "/rootfs/boot/vmlinuz-$KVER" ] && \
+       [ ! -f "/rootfs/usr/lib/modules/$KVER/vmlinuz" ]; then \
+        cp "/rootfs/boot/vmlinuz-$KVER" \
+           "/rootfs/usr/lib/modules/$KVER/vmlinuz"; \
     fi
 
-RUN mkdir -p /sysroot && \
-    mkdir -p /var/home /var/opt /var/srv && \
-    rm -rf /home /opt /srv && \
-    ln -sf var/home /home && \
-    ln -sf var/opt  /opt && \
-    ln -sf var/srv  /srv
+RUN mkdir -p /rootfs/sysroot && \
+    mkdir -p /rootfs/var/home /rootfs/var/opt /rootfs/var/srv && \
+    rm -rf /rootfs/home /rootfs/opt /rootfs/srv && \
+    ln -sf var/home /rootfs/home && \
+    ln -sf var/opt  /rootfs/opt && \
+    ln -sf var/srv  /rootfs/srv
 
-COPY --from=composefs-builder /build/target/release/cfsctl /usr/bin/cfsctl
-COPY --from=cbootc-builder /build/target/release/cbootc /usr/bin/cbootc
+COPY --from=composefs-builder /build/target/release/cfsctl /rootfs/usr/bin/cfsctl
+COPY --from=cbootc-builder /build/target/release/cbootc /rootfs/usr/bin/cbootc
 COPY units/cbootc-update.service units/cbootc-update.timer \
-    /usr/lib/systemd/system/
-RUN systemctl --root / enable \
+    /rootfs/usr/lib/systemd/system/
+RUN systemctl --root /rootfs enable \
         NetworkManager.service systemd-resolved.service cbootc-update.timer && \
-    systemctl --root / set-default multi-user.target
+    systemctl --root /rootfs set-default multi-user.target
 
-RUN rm -rf /boot/*
+RUN rm -rf /rootfs/boot/*
 
 # ---------------------------------------------------------------------------
 # Final stage: UKI + Secure Boot (--target uki-secureboot)
 # ---------------------------------------------------------------------------
 FROM scratch AS uki-secureboot
-COPY --from=uki-sb-final / /
+COPY --from=uki-sb-final /rootfs /
 
 LABEL containers.bootc=1
 LABEL composefs.backend=cfs-rs
