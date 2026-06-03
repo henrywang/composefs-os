@@ -16,6 +16,14 @@ example_image_ubuntu        := "composefs-os-ubuntu-test:latest"
 example_image_ubuntu_uki    := "composefs-os-ubuntu-uki-test:latest"
 example_image_ubuntu_uki_sb := "composefs-os-ubuntu-uki-sb-test:latest"
 
+# Arch image tags (rolling release — no version suffix)
+base_image_arch           := "composefs-os:arch-latest"
+base_image_arch_uki       := "composefs-os:arch-latest-uki"
+base_image_arch_uki_sb    := "composefs-os:arch-latest-uki-sb"
+example_image_arch        := "composefs-os-arch-test:latest"
+example_image_arch_uki    := "composefs-os-arch-uki-test:latest"
+example_image_arch_uki_sb := "composefs-os-arch-uki-sb-test:latest"
+
 # List available recipes
 default:
     @just --list
@@ -106,6 +114,39 @@ build-example-ubuntu-uki-secureboot base=base_image_ubuntu_uki_sb:
         --network=host \
         --build-arg BASE_IMAGE={{base}} \
         -f examples/ubuntu/Containerfile .
+
+# Build the Arch base GRUB image
+build-base-arch:
+    podman build --network=host -t {{base_image_arch}} --target grub -f Containerfile.arch .
+
+# Build the Arch base UKI/systemd-boot image
+build-base-arch-uki:
+    podman build --network=host -t {{base_image_arch_uki}} --target uki -f Containerfile.arch .
+
+# Build the Arch base UKI + Secure Boot image
+build-base-arch-uki-secureboot:
+    podman build --network=host -t {{base_image_arch_uki_sb}} --target uki-secureboot -f Containerfile.arch .
+
+# Build the Arch example GRUB image on top of the base
+build-example-arch base=base_image_arch:
+    podman build -t {{example_image_arch}} \
+        --network=host \
+        --build-arg BASE_IMAGE={{base}} \
+        -f examples/arch/Containerfile .
+
+# Build the Arch example UKI image
+build-example-arch-uki base=base_image_arch_uki:
+    podman build -t {{example_image_arch_uki}} \
+        --network=host \
+        --build-arg BASE_IMAGE={{base}} \
+        -f examples/arch/Containerfile .
+
+# Build the Arch example UKI + Secure Boot image
+build-example-arch-uki-secureboot base=base_image_arch_uki_sb:
+    podman build -t {{example_image_arch_uki_sb}} \
+        --network=host \
+        --build-arg BASE_IMAGE={{base}} \
+        -f examples/arch/Containerfile .
 
 # ── Disk install ──────────────────────────────────────────────────────────────
 
@@ -201,6 +242,23 @@ e2e-uki-upgrade-secureboot image=example_image_uki_sb disk="disk-uki-sb.raw" ovm
     fi
     sudo python3 tests/e2e.py --upgrade --uki-secureboot --source-image {{image}} --ovmf-vars "$vars" {{disk}}
 
+# Arch upgrade variants
+e2e-upgrade-arch image=example_image_arch disk="disk-arch.raw":
+    sudo python3 tests/e2e.py --upgrade --source-image {{image}} {{disk}}
+
+e2e-uki-upgrade-arch image=example_image_arch_uki disk="disk-arch-uki.raw" ovmf_vars="":
+    v="{{ovmf_vars}}"; sudo python3 tests/e2e.py --upgrade --uki --source-image {{image}} ${v:+--ovmf-vars "$v"} {{disk}}
+
+e2e-uki-upgrade-secureboot-arch image=example_image_arch_uki_sb disk="disk-arch-uki-sb.raw" ovmf_vars="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    vars="{{ovmf_vars}}"
+    if [ -z "$vars" ]; then
+        just prep-sb-vars {{disk}} ovmf-vars-arch-uki-sb.fd
+        vars=ovmf-vars-arch-uki-sb.fd
+    fi
+    sudo python3 tests/e2e.py --upgrade --uki-secureboot --source-image {{image}} --ovmf-vars "$vars" {{disk}}
+
 # Ubuntu upgrade variants
 e2e-upgrade-ubuntu image=example_image_ubuntu disk="disk-ubuntu.raw":
     sudo python3 tests/e2e.py --upgrade --source-image {{image}} {{disk}}
@@ -245,6 +303,24 @@ ci-uki: build-base-uki (build-example-uki base_image_uki)
 ci-uki-secureboot: build-base-uki-secureboot (build-example-uki-secureboot base_image_uki_sb)
     just install-disk-uki-secureboot
     just e2e-uki-secureboot
+
+# Full Arch GRUB workflow (no Secure Boot — shim-signed not in official repos)
+ci-arch-grub: build-base-arch (build-example-arch base_image_arch)
+    just install-disk {{example_image_arch}} disk-arch.raw 5G
+    just e2e disk-arch.raw
+
+# Full Arch UKI workflow
+ci-arch-uki: build-base-arch-uki (build-example-arch-uki base_image_arch_uki)
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just install-disk-uki {{example_image_arch_uki}} disk-arch-uki.raw 5G
+    ovmf_vars=$(find /usr/share -name 'OVMF_VARS.fd' ! -name '*.secboot*' ! -name '*.ms.*' 2>/dev/null | head -1)
+    just e2e-uki disk-arch-uki.raw "$ovmf_vars"
+
+# Full Arch UKI + Secure Boot workflow
+ci-arch-uki-secureboot: build-base-arch-uki-secureboot (build-example-arch-uki-secureboot base_image_arch_uki_sb)
+    just install-disk-uki-secureboot {{example_image_arch_uki_sb}} disk-arch-uki-sb.raw 5G
+    just e2e-uki-secureboot disk-arch-uki-sb.raw
 
 # Full Ubuntu GRUB workflow
 ci-ubuntu-grub: build-base-ubuntu (build-example-ubuntu base_image_ubuntu)

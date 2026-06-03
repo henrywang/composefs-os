@@ -1,65 +1,46 @@
-# Minimal bootable Arch image for composefs-rs deployment. STUB.
+# Template for a custom Arch Linux composefs-os image.
 #
-# Not yet validated. Same contract as the Fedora image. Arch normally uses
-# mkinitcpio, but for cbootc we standardize on dracut everywhere.
+# Pattern:
+#   1. FROM composefs-os:arch-latest  (or the -uki / -uki-sb variant)
+#   2. Install packages, write config — /etc and /var are normal here
+#   3. Keep the LABEL block at the bottom
 #
-# Build:  podman build -t arch-cfs-minimal:latest -f examples/arch/Containerfile .
+# Build locally:
+#   podman build -t my-arch-cfs:latest \
+#       --build-arg BASE_IMAGE=composefs-os:arch-latest \
+#       -f examples/arch/Containerfile .
+#
+# Deploy to a disk image file:
+#   sudo podman run --rm --privileged \
+#       -v $(pwd):/output -v /var/lib/containers:/var/lib/containers \
+#       -v /var/tmp:/var/tmp \
+#       my-arch-cfs:latest cbootc install to-disk /output/disk.raw --size 10G
 
-# ---------------------------------------------------------------------------
-# Stage 0: Build cbootc from source
-# ---------------------------------------------------------------------------
-FROM rust:1-slim AS builder
-WORKDIR /build
-COPY Cargo.toml Cargo.lock ./
-COPY src/ src/
-RUN cargo build --release
+ARG BASE_IMAGE=composefs-os:arch-latest
+FROM ${BASE_IMAGE}
 
-# ---------------------------------------------------------------------------
-# Stage 1: OS image
-# ---------------------------------------------------------------------------
-FROM archlinux:latest
+# --- Customise below this line -------------------------------------------
 
-RUN pacman -Syu --noconfirm \
-        linux linux-firmware \
-        systemd udev dbus-broker \
-        util-linux coreutils bash \
-        networkmanager iproute2 iputils \
-        e2fsprogs dosfstools btrfs-progs \
-        grub efibootmgr \
-        dracut \
-        vim less \
-    && pacman -Rns --noconfirm mkinitcpio || true \
-    && pacman -Scc --noconfirm
+# Use COPY (not RUN echo) for /etc/hostname: buildah bind-mounts a synthetic
+# /etc/hostname into every RUN container, so writes via RUN are silently lost.
+# COPY writes directly into the image layer without launching a container.
+COPY <<EOF /etc/hostname
+myhost
+EOF
 
-# Layout adjustments — same as Fedora.
-# Use cp+find instead of mv: container runtime bind-mounts hosts/hostname/resolv.conf.
-RUN if [ -d /etc ] && [ ! -L /etc ]; then \
-        mkdir /usr/etc && \
-        cp -a /etc/. /usr/etc/ && \
-        find /etc -mindepth 1 -maxdepth 1 \
-            ! -name hosts ! -name hostname ! -name resolv.conf \
-            -exec rm -rf {} +; \
-    fi
-RUN if [ -d /var ] && [ ! -L /var ]; then \
-        mkdir -p /usr/share/factory && \
-        mv /var /usr/share/factory/var && \
-        mkdir /var; \
-    fi
-RUN mkdir -p /usr/lib/tmpfiles.d && \
-    printf 'q /var 0755 - - -\nC /var - - - - -\n' \
-        > /usr/lib/tmpfiles.d/00-var-factory.conf
+# Serial console autologin — convenient for local QEMU testing.
+# Remove or replace with SSH keys for any internet-facing deployment.
+RUN mkdir -p /usr/lib/systemd/system/serial-getty@ttyS0.service.d && \
+    printf '[Service]\nExecStart=\nExecStart=-/sbin/agetty --autologin root --noclear %%I 115200 vt220\n' \
+        > /usr/lib/systemd/system/serial-getty@ttyS0.service.d/autologin.conf
 
-# TODO: composefs dracut module + dracut invocation
+# gawk is already provided by the base package; add your own packages here, e.g.:
+RUN pacman -S --noconfirm --needed htop && pacman -Scc --noconfirm
 
-# ---------------------------------------------------------------------------
-# Install cbootc
-# ---------------------------------------------------------------------------
-COPY --from=builder /build/target/release/cbootc /usr/bin/cbootc
-COPY units/cbootc-update.service units/cbootc-update.timer /usr/lib/systemd/system/
-RUN systemctl enable cbootc-update.timer
+# --- Do not edit below this line ------------------------------------------
 
 LABEL containers.bootc=1
 LABEL composefs.backend=cfs-rs
-LABEL org.opencontainers.image.title="Arch Minimal (composefs-rs)"
+LABEL org.opencontainers.image.title="My Arch Linux composefs-os image"
 
 CMD ["/sbin/init"]
