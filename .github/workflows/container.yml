@@ -103,3 +103,36 @@ jobs:
           tags: ghcr.io/${{ github.repository_owner }}/composefs-os:ubuntu-26.04-uki-sb
           cache-from: type=gha,scope=ubuntu
           cache-to: type=gha,mode=max,scope=ubuntu
+
+      - name: Build and push composefs-os:arch-latest (GRUB)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Containerfile.arch
+          target: grub
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/composefs-os:arch-latest
+          cache-from: type=gha,scope=arch
+          cache-to: type=gha,mode=max,scope=arch
+
+      - name: Build and push composefs-os:arch-latest-uki (systemd-boot + UKI)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Containerfile.arch
+          target: uki
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/composefs-os:arch-latest-uki
+          cache-from: type=gha,scope=arch
+          cache-to: type=gha,mode=max,scope=arch
+
+      - name: Build and push composefs-os:arch-latest-uki-sb (systemd-boot + UKI + Secure Boot)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Containerfile.arch
+          target: uki-secureboot
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/composefs-os:arch-latest-uki-sb
+          cache-from: type=gha,scope=arch
+          cache-to: type=gha,mode=max,scope=arch
