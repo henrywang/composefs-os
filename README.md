@@ -27,7 +27,11 @@ See [DESIGN.md](DESIGN.md) for rationale and architecture.
 | `ghcr.io/henrywang/composefs-os:ubuntu-26.04` | GRUB (BLS Type 1) | Working |
 | `ghcr.io/henrywang/composefs-os:ubuntu-26.04-uki` | systemd-boot + UKI (BLS Type 2) | Working |
 | `ghcr.io/henrywang/composefs-os:ubuntu-26.04-uki-sb` | systemd-boot + UKI + Secure Boot | Working |
-| Arch Linux | — | Planned |
+| `ghcr.io/henrywang/composefs-os:arch-latest` | GRUB (BLS Type 1) | Working |
+| `ghcr.io/henrywang/composefs-os:arch-latest-uki` | systemd-boot + UKI (BLS Type 2) | Working |
+| `ghcr.io/henrywang/composefs-os:arch-latest-uki-sb` | systemd-boot + UKI + Secure Boot | Working |
+
+> **Note:** Arch images use a rolling release tag (`arch-latest`). GRUB + Secure Boot is not available for Arch — Arch does not ship a signed shim or signed GRUB EFI binary in official repositories (`shim-signed` is AUR-only). Use the `-uki-sb` variant instead.
 
 
 ## Quick Start
@@ -159,6 +163,10 @@ RUN dnf install -y vim htop && dnf clean all
 FROM ghcr.io/henrywang/composefs-os:ubuntu-26.04
 RUN apt-get install -y vim htop && apt-get clean
 
+# Arch Linux (rolling)
+FROM ghcr.io/henrywang/composefs-os:arch-latest
+RUN pacman -S --noconfirm --needed vim htop && pacman -Scc --noconfirm
+
 # Use COPY (not RUN echo) for /etc/hostname: buildah bind-mounts a synthetic
 # /etc/hostname into every RUN container, so writes via RUN are silently lost.
 COPY <<EOF /etc/hostname
@@ -166,7 +174,7 @@ myhost
 EOF
 ```
 
-Use `examples/fedora/Containerfile` or `examples/ubuntu/Containerfile` as full templates.
+Use `examples/fedora/Containerfile`, `examples/ubuntu/Containerfile`, or `examples/arch/Containerfile` as full templates.
 
 ## In-System Management
 
@@ -199,24 +207,25 @@ survives upgrades. `cbootc-update.timer` (enabled in the base image) runs
 ```
 composefs-os/
   Containerfile.fedora         Builds Fedora 44 base images (--target grub | uki | uki-secureboot)
-  Containerfile.ubuntu       Builds Ubuntu 26.04 base images (--target grub | uki | uki-secureboot)
-  src/                       cbootc source (Rust)
+  Containerfile.ubuntu         Builds Ubuntu 26.04 base images (--target grub | uki | uki-secureboot)
+  Containerfile.arch           Builds Arch Linux base images (--target grub | uki | uki-secureboot)
+  src/                         cbootc source (Rust)
   units/
-    cbootc-update.service    Systemd service for automatic upgrades
-    cbootc-update.timer      Systemd timer (daily, randomised delay)
+    cbootc-update.service      Systemd service for automatic upgrades
+    cbootc-update.timer        Systemd timer (daily, randomised delay)
   examples/
     fedora/
-      Containerfile          Template for derived Fedora images
+      Containerfile            Template for derived Fedora images
     ubuntu/
-      Containerfile          Template for derived Ubuntu 26.04 images
+      Containerfile            Template for derived Ubuntu 26.04 images
     arch/
-      Containerfile          Arch Linux (stub — not yet functional)
+      Containerfile            Template for derived Arch Linux images
   tests/
-    e2e.py                   QEMU-based end-to-end test suite
+    e2e.py                     QEMU-based end-to-end test suite
   .github/workflows/
-    ci.yml                   Rust build, test, lint
-    container.yml            Build and push base image to ghcr.io
-    e2e.yml                  End-to-end tests (boots in QEMU)
+    ci.yml                     Rust build, test, lint
+    container.yml              Build and push base images to ghcr.io
+    e2e.yml                    End-to-end tests (boots in QEMU)
 ```
 
 ## Known Limitations

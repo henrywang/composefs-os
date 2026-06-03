@@ -124,21 +124,24 @@ the container itself — no separate image reference needed at install time.
 Three EFI boot paths are supported:
 
 - **Default (GRUB):** on Fedora, runs `grub2-install --target=x86_64-efi`; on
-  Ubuntu/Debian (which do not have `grub2-install`), builds a self-contained EFI
-  binary with `grub-mkstandalone` and generates a traditional `menuentry`-based
-  `grub.cfg` (Ubuntu does not ship `blscfg.mod`). Works on any EFI system;
-  rejected by firmware with Secure Boot enabled.
+  Ubuntu/Debian and Arch (which have `grub` rather than `grub2`), builds a
+  self-contained EFI binary with `grub-mkstandalone` and generates a traditional
+  `menuentry`-based `grub.cfg`. Works on any EFI system; rejected by firmware
+  with Secure Boot enabled.
 - **`--secure-boot` (GRUB + SB):** copies the distro-signed shim + GRUB from
   `/usr/share/efi/EFI/<distro>/` (preserved in the base image at build time) to
   the ESP. The auto-detected distro subdirectory ensures the signed GRUB's
   compiled-in search prefix matches. No custom key enrollment required — the
   Microsoft-signed shim trusts the distro-signed GRUB out of the box.
+  **Not available on Arch Linux** — Arch does not ship a signed shim or signed
+  GRUB EFI binary in official repositories (`shim-signed` is AUR-only).
 - **`--uki --secure-boot` (UKI + SB):** generates a self-signed key pair (or
   accepts `--sb-key`/`--sb-cert`), signs systemd-boot and the UKI `.efi` with
   `sbsign`, and installs signed systemd-boot directly as `BOOTx64.EFI` — no
   shim. The firmware verifies binaries directly against its Signature Database
   (db). The signing cert must be enrolled in the db once; the key is persisted
-  in `/var/lib/cbootc/` so `cbootc upgrade` can re-sign future UKIs.
+  in `/var/lib/cbootc/` so `cbootc upgrade` can re-sign future UKIs. Supported
+  on all three distros including Arch.
 
 ## Command Surface
 
