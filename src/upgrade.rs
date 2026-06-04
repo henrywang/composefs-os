@@ -116,6 +116,7 @@ pub fn run(reboot: bool) -> Result<()> {
         // without a writable efivarfs, e.g. container image builds).
         set_loader_conf_default(Path::new(EFI_ESP), &digest)?;
         bootctl_set_default(&digest)?;
+        prune_old_ukis(&digest)?;
     } else {
         patch_bls_entry(Path::new(BOOT_DIR), &digest, &image_ref)?;
         if !crate::install::has_grub2() {
@@ -151,6 +152,29 @@ pub fn run(reboot: bool) -> Result<()> {
         println!("Run 'systemctl reboot' to apply, or pass --reboot.");
         Ok(())
     }
+}
+
+fn prune_old_ukis(new_digest: &str) -> Result<()> {
+    let running = current_composefs_digest();
+    let keep: std::collections::HashSet<&str> = std::iter::once(new_digest)
+        .chain(running.as_deref())
+        .collect();
+
+    for entry in fs::read_dir(EFI_LINUX_DIR).with_context(|| format!("reading {EFI_LINUX_DIR}"))? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("efi") {
+            continue;
+        }
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        if !keep.contains(stem) {
+            println!("Pruning old UKI: {}", path.display());
+            if let Err(e) = fs::remove_file(&path) {
+                eprintln!("warning: failed to prune {}: {e}", path.display());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Convert a Type 1 BLS entry (written by `prepare-boot` on the XBOOTLDR/`bootdir`)

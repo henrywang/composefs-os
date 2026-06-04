@@ -168,7 +168,11 @@ RUN mkdir -p /rootfs/sysroot && \
 # grub's module files (same code path as Ubuntu; Arch has 'grub', not 'grub2').
 # ---------------------------------------------------------------------------
 FROM rootfs-common AS rootfs-grub
-RUN pacman -r /rootfs --noconfirm -Syu grub efibootmgr
+# -S --needed installs only the listed packages without a full system upgrade.
+# Avoid -Syu here: upgrading would install a newer kernel in /usr/lib/modules/
+# without a matching initramfs (dracut ran in rootfs-common for the original
+# kernel only), causing cfsctl prepare-boot to panic on the kernel-without-initramfs.
+RUN pacman -r /rootfs --noconfirm -S --needed grub efibootmgr
 RUN rm -rf /rootfs/boot/*
 
 # ---------------------------------------------------------------------------
@@ -177,7 +181,7 @@ RUN rm -rf /rootfs/boot/*
 # in rootfs-common.
 # ---------------------------------------------------------------------------
 FROM rootfs-common AS rootfs-uki
-RUN pacman -r /rootfs --noconfirm -Syu systemd-ukify
+RUN pacman -r /rootfs --noconfirm -S --needed systemd-ukify
 RUN rm -rf /rootfs/boot/*
 
 # ---------------------------------------------------------------------------
@@ -186,7 +190,7 @@ RUN rm -rf /rootfs/boot/*
 # time.  No shim needed: firmware verifies against the UEFI Signature Database.
 # ---------------------------------------------------------------------------
 FROM rootfs-common AS rootfs-uki-sb
-RUN pacman -r /rootfs --noconfirm -Syu systemd-ukify sbsigntools openssl
+RUN pacman -r /rootfs --noconfirm -S --needed systemd-ukify sbsigntools openssl
 RUN rm -rf /rootfs/boot/*
 
 # ---------------------------------------------------------------------------

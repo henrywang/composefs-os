@@ -439,16 +439,27 @@ def test_new_grub_entry_created(child):
     assert count >= 2, f"expected ≥2 BLS entries after upgrade, got {count}"
 
 
-def test_new_uki_entry_created(child):
-    """Two or more UKI .efi files must exist after upgrade."""
+_STALE_UKI_STEM = "0" * 64
+_STALE_UKI = f"/boot/efi/EFI/Linux/{_STALE_UKI_STEM}.efi"
+
+
+def plant_stale_uki(child):
+    """Plant a fake stale .efi (realistic hex digest stem) to give pruning something to delete."""
+    rc, _ = run_cmd(child, f"touch {_STALE_UKI}")
+    assert rc == 0, "failed to plant stale UKI"
+
+
+def test_uki_pruned(child):
+    """After upgrade: stale .efi gone, exactly 2 .efi files remain."""
+    rc, _ = run_cmd(child, f"test ! -f {_STALE_UKI}")
+    assert rc == 0, "stale UKI was not pruned after upgrade"
     rc, out = run_cmd(
         child, "echo UKICOUNT:$(ls /boot/efi/EFI/Linux/*.efi 2>/dev/null | wc -l)"
     )
     assert rc == 0, "could not count UKI entries"
     m = re.search(r"UKICOUNT:(\d+)", out)
     assert m, f"could not parse UKI count from output:\n{out!r}"
-    count = int(m.group(1))
-    assert count >= 2, f"expected ≥2 UKI entries after upgrade, got {count}"
+    assert int(m.group(1)) == 2, f"expected exactly 2 UKIs after upgrade, got {out}"
 
 
 def test_upgraded_digest_active(child, previous_digest):
@@ -541,10 +552,14 @@ def run_upgrade_sequence(disk_image, ovmf_code, registry, uki=False,
         image_ref = (
             f"docker://{REGISTRY_HOST}:{registry.port}/test-image:latest"
         )
+
+        if uki:
+            step("plant_stale_uki", plant_stale_uki, child)
+
         step("switch_to_v2", test_switch, child, image_ref)
 
         if uki:
-            step("new_uki_entry_created", test_new_uki_entry_created, child)
+            step("uki_pruned", test_uki_pruned, child)
         else:
             step("new_grub_entry_created", test_new_grub_entry_created, child)
 
