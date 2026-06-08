@@ -16,6 +16,10 @@ example_image_ubuntu        := "composefs-os-ubuntu-test:latest"
 example_image_ubuntu_uki    := "composefs-os-ubuntu-uki-test:latest"
 example_image_ubuntu_uki_sb := "composefs-os-ubuntu-uki-sb-test:latest"
 
+# AWS image tags
+aws_image_fedora := "composefs-os-aws:fedora-44"
+aws_image_ubuntu := "composefs-os-aws:ubuntu-26.04"
+
 # Arch image tags (rolling release — no version suffix)
 base_image_arch           := "composefs-os:arch-latest"
 base_image_arch_uki       := "composefs-os:arch-latest-uki"
@@ -115,6 +119,20 @@ build-example-ubuntu-uki-secureboot base=base_image_ubuntu_uki_sb:
         --build-arg BASE_IMAGE={{base}} \
         -f examples/ubuntu/Containerfile .
 
+# Build the Fedora AWS image (GRUB base + cloud-init)
+build-aws-fedora base=base_image:
+    podman build -t {{aws_image_fedora}} \
+        --network=host \
+        --build-arg BASE_IMAGE={{base}} \
+        -f examples/fedora/Containerfile.aws .
+
+# Build the Ubuntu AWS image (GRUB base + cloud-init)
+build-aws-ubuntu base=base_image_ubuntu:
+    podman build -t {{aws_image_ubuntu}} \
+        --network=host \
+        --build-arg BASE_IMAGE={{base}} \
+        -f examples/ubuntu/Containerfile.aws .
+
 # Build the Arch base GRUB image
 build-base-arch:
     podman build --network=host -t {{base_image_arch}} --target grub -f Containerfile.arch .
@@ -185,6 +203,24 @@ install-disk-uki-secureboot image=example_image_uki_sb disk="disk-uki-sb.raw" si
         -v /var/tmp:/var/tmp \
         {{image}} \
         cbootc install to-disk /output/{{disk}} --size {{size}} --uki --secure-boot
+
+# Create a Fedora AWS raw disk image for import into EC2 (requires sudo)
+install-disk-aws-fedora image=aws_image_fedora disk="disk-aws-fedora.raw" size="10G":
+    sudo podman run --rm --privileged \
+        -v "$(pwd)":/output \
+        -v /var/lib/containers:/var/lib/containers \
+        -v /var/tmp:/var/tmp \
+        {{image}} \
+        cbootc install to-disk /output/{{disk}} --size {{size}}
+
+# Create an Ubuntu AWS raw disk image for import into EC2 (requires sudo)
+install-disk-aws-ubuntu image=aws_image_ubuntu disk="disk-aws-ubuntu.raw" size="10G":
+    sudo podman run --rm --privileged \
+        -v "$(pwd)":/output \
+        -v /var/lib/containers:/var/lib/containers \
+        -v /var/tmp:/var/tmp \
+        {{image}} \
+        cbootc install to-disk /output/{{disk}} --size {{size}}
 
 # ── End-to-end tests ──────────────────────────────────────────────────────────
 
@@ -336,6 +372,14 @@ ci-ubuntu-uki: build-base-ubuntu-uki (build-example-ubuntu-uki base_image_ubuntu
 ci-ubuntu-uki-secureboot: build-base-ubuntu-uki-secureboot (build-example-ubuntu-uki-secureboot base_image_ubuntu_uki_sb)
     just install-disk-uki-secureboot {{example_image_ubuntu_uki_sb}} disk-ubuntu-uki-sb.raw 5G
     just e2e-uki-secureboot disk-ubuntu-uki-sb.raw
+
+# Full Fedora AWS image build: base → aws image → raw disk
+aws-fedora: build-base (build-aws-fedora base_image)
+    just install-disk-aws-fedora
+
+# Full Ubuntu AWS image build: base → aws image → raw disk
+aws-ubuntu: build-base-ubuntu (build-aws-ubuntu base_image_ubuntu)
+    just install-disk-aws-ubuntu
 
 # Full GRUB upgrade/switch/rollback workflow (Fedora)
 ci-grub-upgrade: build-base (build-example base_image)
