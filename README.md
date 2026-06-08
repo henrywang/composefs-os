@@ -176,6 +176,54 @@ EOF
 
 Use `examples/fedora/Containerfile`, `examples/ubuntu/Containerfile`, or `examples/arch/Containerfile` as full templates.
 
+## AWS (EC2) Images
+
+`examples/fedora/Containerfile.aws` and `examples/ubuntu/Containerfile.aws` extend the GRUB base images with:
+
+- **cloud-init** (EC2 datasource only) — injects SSH keys and hostname from instance metadata on first boot
+- **NVMe + Xen drivers** rebuilt into the initramfs — required for EBS volumes on current and older EC2 instance types
+
+### Prerequisites
+
+A `vmimport` IAM role must exist in your AWS account (one-time setup):
+<https://docs.aws.amazon.com/vm-import/latest/userguide/required-permissions.html>
+
+### Build and upload
+
+```sh
+# 1. Build the base image (skip if already built)
+just build-base          # Fedora
+just build-base-ubuntu   # Ubuntu
+
+# 2. Build the AWS image layer (cloud-init + NVMe initramfs)
+just build-aws-fedora
+just build-aws-ubuntu
+
+# 3. Write a raw disk image
+just install-disk-aws-fedora   # → disk-aws-fedora.raw
+just install-disk-aws-ubuntu   # → disk-aws-ubuntu.raw
+
+# Or run all three steps at once (starting from scratch):
+just ci-aws-fedora
+just ci-aws-ubuntu
+
+# 4. Upload to S3, import snapshot, and register as AMI
+./examples/upload-ami.sh -d disk-aws-fedora.raw -b my-s3-bucket
+./examples/upload-ami.sh -d disk-aws-ubuntu.raw -b my-s3-bucket -n my-ubuntu-ami -r us-east-1
+```
+
+`upload-ami.sh` options:
+
+| Flag | Description |
+|------|-------------|
+| `-d DISK` | Raw disk image path |
+| `-b BUCKET` | S3 bucket for staging |
+| `-n NAME` | AMI name (default: `composefs-os-TIMESTAMP`) |
+| `-r REGION` | AWS region (default: CLI config / `AWS_DEFAULT_REGION`) |
+| `-k` | Keep the S3 object after import |
+
+The registered AMI uses UEFI boot mode, ENA networking, and a gp3 root volume.
+
 ## In-System Management
 
 Once booted, `cbootc` manages the system:
@@ -215,11 +263,14 @@ composefs-os/
     cbootc-update.timer        Systemd timer (daily, randomised delay)
   examples/
     fedora/
-      Containerfile            Template for derived Fedora images
+      Containerfile            Template for derived Fedora images (local/QEMU)
+      Containerfile.aws        Fedora AWS image template (cloud-init + NVMe drivers)
     ubuntu/
-      Containerfile            Template for derived Ubuntu 26.04 images
+      Containerfile            Template for derived Ubuntu 26.04 images (local/QEMU)
+      Containerfile.aws        Ubuntu AWS image template (cloud-init + NVMe drivers)
     arch/
       Containerfile            Template for derived Arch Linux images
+    upload-ami.sh              Upload a raw disk image to S3 and register as an AMI
   tests/
     e2e.py                     QEMU-based end-to-end test suite
   .github/workflows/

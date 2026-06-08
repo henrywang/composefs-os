@@ -1,0 +1,54 @@
+# AWS image template for Ubuntu 26.04 composefs-os.
+#
+# Installs cloud-init (EC2 datasource) so that SSH keys and hostname are
+# injected from instance metadata on first boot.  Serial console autologin
+# is intentionally omitted — EC2 access is via SSH only.
+#
+# Build locally:
+#   podman build -t composefs-os-aws:ubuntu-26.04 \
+#       --build-arg BASE_IMAGE=composefs-os:ubuntu-26.04 \
+#       -f examples/ubuntu/Containerfile.aws .
+#
+# Create a raw disk image for AWS import:
+#   sudo podman run --rm --privileged \
+#       -v $(pwd):/output -v /var/lib/containers:/var/lib/containers \
+#       -v /var/tmp:/var/tmp \
+#       composefs-os-aws:ubuntu-26.04 \
+#       cbootc install to-disk /output/disk-aws-ubuntu.raw --size 10G
+#
+# Import to AWS (after uploading disk-aws-ubuntu.raw to S3):
+#   aws ec2 import-snapshot --disk-container \
+#       "Format=RAW,UserBucket={S3Bucket=<bucket>,S3Key=disk-aws-ubuntu.raw}"
+
+ARG BASE_IMAGE=composefs-os:ubuntu-26.04
+FROM ${BASE_IMAGE}
+
+# --- Customise below this line -------------------------------------------
+
+COPY <<EOF /etc/hostname
+localhost
+EOF
+
+RUN apt-get update && apt-get install -y --no-install-recommends cloud-init \
+    && rm -rf /var/lib/apt/lists/*
+
+# Restrict to EC2 datasource only to avoid slow NoCloud/ConfigDrive probing
+RUN mkdir -p /etc/cloud/cloud.cfg.d && \
+    printf 'datasource_list: [Ec2]\n' > /etc/cloud/cloud.cfg.d/99-aws.cfg
+
+# Rebuild initramfs with AWS storage drivers (NVMe for EBS, Xen for older instances)
+RUN KVER=$(ls /usr/lib/modules | head -1) && \
+    dracut --force --no-hostonly --kver "$KVER" \
+        --add "systemd systemd-initrd dbus base bash composefs" \
+        --add-drivers "overlay erofs loop virtio_blk virtio_pci vfat nvme nvme_core xen_blkfront" \
+        --reproducible \
+        "/usr/lib/modules/$KVER/initramfs.img"
+
+# --- Do not edit below this line ------------------------------------------
+
+LABEL containers.bootc=1
+LABEL composefs.backend=cfs-rs
+LABEL org.opencontainers.image.title="Ubuntu composefs-os AWS image"
+LABEL org.opencontainers.image.version="26.04"
+
+CMD ["/sbin/init"]
